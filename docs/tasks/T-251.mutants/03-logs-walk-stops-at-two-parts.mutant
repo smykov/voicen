@@ -1,0 +1,8 @@
+guarantee: I3: a file anywhere up the path is not_a_folder (blocked_by_file walk)
+file: crates/voicen-core/src/files.rs
+added_by: test-writer
+--- old
+    path.ancestors()
+--- new
+    path.ancestors().take(2)
+--- end

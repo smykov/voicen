@@ -1,0 +1,9 @@
+guarantee: I5 / T-123 r4#1: core always writes the `lang` key (null when absent)
+file: crates/voicen-core/src/call/transcript.rs
+added_by: test-writer
+--- old
+    pub lang: Option<String>,
+--- new
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lang: Option<String>,
+--- end

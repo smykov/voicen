@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use super::CallSettings;
+use crate::files::blocked_by_file;
 
 /// The file the probe creates and deletes in a root (research R19).
 pub const WRITE_PROBE_FILE: &str = ".voicen-write-probe";
@@ -47,7 +48,8 @@ pub trait CallRoots: Send + Sync {
 ///
 /// Probe order: a relative path is `relative` (the disk is not touched); the default
 /// root is created (`create_dir_all`, the app's own folder); any other root must
-/// exist (`missing`) and be a folder (`not_a_folder`) and is never created; then the
+/// exist (`missing`) and be a folder (`not_a_folder`, also when a regular file is anywhere
+/// up its path) and is never created; then the
 /// probe file is created or truncated (not `create_new`, so a probe left by a crash
 /// does not block) and removed. Each io error goes through [`reason_of`].
 #[derive(Debug, Clone)]
@@ -70,10 +72,19 @@ impl CallRoots for FsCallRoots {
         if !root.is_absolute() {
             return Err(UnwritableReason::Relative);
         }
+        // A regular file anywhere up the path is `not_a_folder` on every OS (T-251): Windows
+        // reports it as "path not found" (or, for the create, "already exists").
+        let located = |e: io::Error| {
+            if blocked_by_file(root) {
+                UnwritableReason::NotAFolder
+            } else {
+                reason_of(e.kind())
+            }
+        };
         if root == self.default_root {
-            fs::create_dir_all(root).map_err(|e| reason_of(e.kind()))?;
+            fs::create_dir_all(root).map_err(located)?;
         }
-        let meta = fs::metadata(root).map_err(|e| reason_of(e.kind()))?;
+        let meta = fs::metadata(root).map_err(located)?;
         if !meta.is_dir() {
             return Err(UnwritableReason::NotAFolder);
         }
@@ -251,18 +262,29 @@ mod tests {
         let under = file.join("calls");
         let got = fs_roots.probe(&under);
         // Unix says "not a directory" for a path below a file; Windows says "path not
-        // found". Either way the root is refused, never created.
-        #[cfg(unix)]
+        // found" and the nearest existing ancestor decides (T-251 I3, decision #372): the
+        // answer is `NotAFolder` on every OS, never `Missing`.
         assert_eq!(got, Err(UnwritableReason::NotAFolder));
-        #[cfg(not(unix))]
-        assert!(
-            matches!(
-                got,
-                Err(UnwritableReason::NotAFolder | UnwritableReason::Missing)
-            ),
-            "{got:?}"
-        );
         assert!(file.is_file(), "the file is still a file");
+    }
+
+    #[test]
+    fn probe_refuses_a_root_two_levels_under_a_regular_file_as_not_a_folder() {
+        // T-251 I3: the file is not the root's parent but higher up. Windows reports
+        // "path not found" for it (red on Windows CI before the fix; Unix answers ENOTDIR
+        // already). Bite: the immediate-parent rule; a walk that stops at the first missing
+        // part; the root created below the file.
+        let dir = TempDir::new();
+        let (fs_roots, _) = roots(&dir);
+        let file = dir.path().join("a-file");
+        fs::write(&file, b"x").expect("write");
+        let under = file.join("sub").join("calls");
+        assert_eq!(fs_roots.probe(&under), Err(UnwritableReason::NotAFolder));
+        assert!(file.is_file(), "the file is still a file");
+        // A root whose nearest existing ancestor is a folder is only missing.
+        let gone = dir.path().join("nope").join("calls");
+        assert_eq!(fs_roots.probe(&gone), Err(UnwritableReason::Missing));
+        assert!(!dir.path().join("nope").exists(), "nothing created");
     }
 
     #[test]

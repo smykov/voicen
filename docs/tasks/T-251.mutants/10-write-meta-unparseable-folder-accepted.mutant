@@ -1,0 +1,8 @@
+guarantee: I1: a folder name that is not a call id is refused
+file: crates/voicen-core/src/call/storage.rs
+added_by: test-writer
+--- old
+    let shaped = folder.is_some_and(|id| meta_shape_ok(meta, &id));
+--- new
+    let shaped = folder.is_none_or(|id| meta_shape_ok(meta, &id));
+--- end

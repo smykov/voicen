@@ -16,6 +16,7 @@ pub mod dictation;
 pub mod engine;
 pub mod events;
 pub mod failure;
+pub mod files;
 pub mod history;
 pub mod hotkey_registrar;
 pub mod i18n;

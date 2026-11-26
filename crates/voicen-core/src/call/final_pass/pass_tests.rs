@@ -1448,6 +1448,64 @@ fn a_transcript_that_fails_validation_is_logged_and_not_written() {
     );
 }
 
+#[test]
+fn names_on_disk_that_lack_a_segment_speaker_end_the_pass_failed_storage_with_no_transcript_json() {
+    // T-251 I2 (decision #372): the validated merged transcript is written with the speakers
+    // of the meta.json on disk (carry_disk_names). A meta.json edited during the pass so that
+    // `s1` is gone would give a transcript.json that read_transcript refuses; the pass ends
+    // `failed: storage`, logs transcript_invalid and writes no transcript.json. Bite:
+    // export_json's result not validated in write_ready_files (the pass ends `ready` with an
+    // invalid transcript.json); the error swallowed into a ready call.
+    let speech = [(1_000u64, 5_000u64)];
+    let dir = Arc::new(Mutex::new(None::<PathBuf>));
+    let planted = dir.clone();
+    let engine = FakeEngine::new(true, answer_ok).on_request(move |_| {
+        if let Some(d) = lock(&planted).take() {
+            let path = d.join("meta.json");
+            let mut meta: serde_json::Value = ok(serde_json::from_slice(&ok(fs::read(&path))));
+            some(meta.as_object_mut(), "meta is an object").insert(
+                "speakers".to_string(),
+                serde_json::json!([{"id": "me", "name": "Alice"}]),
+            );
+            ok(fs::write(&path, meta.to_string()));
+        }
+    });
+    let out = run_with(
+        Src::marked(0, 10_000),
+        Src::marked(1, 10_000),
+        engine,
+        Opts::new(marked_primary(&speech)).offset(5_000).prep({
+            let dir = dir.clone();
+            move |_, d| *lock(&dir) = Some(d.to_path_buf())
+        }),
+    );
+    assert_eq!(
+        out.out.outcome,
+        FinalOutcome::Failed {
+            reason: FailReason::Storage
+        }
+    );
+    assert!(
+        out.logs().iter().any(|e| matches!(
+            e,
+            LogEvent::TranscriptInvalid {
+                rule: InvalidRule::UnknownSpeaker,
+                ..
+            }
+        )),
+        "transcript_invalid in {:?}",
+        out.logs()
+    );
+    assert!(
+        !out.names().contains("transcript.json"),
+        "{:?}",
+        out.names()
+    );
+    let meta = out.meta();
+    assert_eq!(meta.state, CallState::Failed);
+    assert_eq!(meta.failure.map(|f| f.reason), Some(FailReason::Storage));
+}
+
 // ---- the TrackResult shape (storage) ------------------------------------------------------------
 
 #[test]
