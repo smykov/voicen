@@ -70,6 +70,12 @@ pub struct SaveRequest {
 /// ([`provider_host_of`]): JSON text for a remote host, null for a loopback host
 /// or an invalid URL; the key is always present (spec 007 FR-031, T-155). The
 /// window shows the provider line from it and never classifies a host itself.
+///
+/// `call_hotkey_unavailable` is true exactly while the call slot's last
+/// registration attempt failed (e.g. the call hotkey was taken at startup),
+/// read at build time from [`HotkeyRegistrar::call_hotkey_unavailable`]; the key
+/// is always present (spec 007 US9 #3, decisions #306/#373, T-232). The Calls
+/// tab marks `calls.hotkey` from it and never infers it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SettingsView {
     pub settings: Settings,
@@ -79,6 +85,7 @@ pub struct SettingsView {
     pub unavailable: bool,
     #[serde(serialize_with = "serialize_provider_host")]
     pub provider_host: Option<ProviderHost>,
+    pub call_hotkey_unavailable: bool,
 }
 
 /// `ProviderHost` has no `Serialize` (its value reaches no log by accident); the
@@ -770,6 +777,7 @@ impl SettingsService {
             first_run: self.load.first_run,
             reset_notice: self.load.reset_notice,
             unavailable: self.load.unavailable,
+            call_hotkey_unavailable: self.deps.hotkeys.call_hotkey_unavailable(),
         }
     }
 
@@ -4159,6 +4167,7 @@ mod tests {
             reset_notice: true,
             unavailable: false,
             provider_host: provider_host_of(&sample(EngineKind::Api).api.base_url),
+            call_hotkey_unavailable: false,
         };
         let saved = SaveOutcome::Saved {
             view: view.clone(),
@@ -4353,6 +4362,7 @@ mod tests {
             assert_eq!(
                 keys,
                 [
+                    "call_hotkey_unavailable",
                     "first_run",
                     "keys",
                     "provider_host",

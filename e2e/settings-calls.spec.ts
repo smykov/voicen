@@ -444,3 +444,83 @@ test("with ui_language ru the Calls tab, its labels, the provider line and the r
   await expect(field(page, "calls.storage_root")).toHaveAttribute("aria-invalid", "true");
   expect(errors).toEqual([]);
 });
+
+// ---- (6) T-232: the startup registration conflict of the call hotkey ---------------------
+// The mark comes from the saved view's `call_hotkey_unavailable` (core, decisions #306, #373):
+// the view samples are built here from the fixture's first-run view (spread + override), so the
+// spec does not depend on the regenerated fixture. The window infers nothing.
+
+/** `view` as `settings_get` returns it while the call slot's registration failed (or not). */
+function withCallMark(view: SettingsView, mark: boolean): SettingsView {
+  return { ...view, call_hotkey_unavailable: mark } as SettingsView;
+}
+
+test("failure branch: a view with call_hotkey_unavailable true marks calls.hotkey with the unavailable text on opening the Calls tab, without a save", async ({ page }) => {
+  const errors = pageErrors(page);
+  await open(page, "/settings", withCallMark(firstRunView(), true));
+  await tab(page, "calls").click();
+
+  const hotkey = field(page, "calls.hotkey");
+  await expect(hotkey).toHaveAttribute("aria-invalid", "true");
+  await expect(hotkey).toHaveAccessibleDescription(new RegExp(en("error.hotkey.unavailable").slice(0, 30)));
+  await expect(page.getByText(en("error.hotkey.unavailable"))).toHaveCount(1);
+  // Only that field; nothing in the form-level list; no save was made.
+  await expect(field(page, "calls.reminder")).not.toHaveAttribute("aria-invalid", "true");
+  await expect(field(page, "calls.storage_root")).not.toHaveAttribute("aria-invalid", "true");
+  await expect(page.getByTestId("settings-errors")).toHaveCount(0);
+  expect(await calls(page, "settings_save")).toEqual([]);
+  expect(errors).toEqual([]);
+});
+
+test("the unavailable mark shows on the Calls tab only, not on the Recording tab", async ({ page }) => {
+  await open(page, "/settings?tab=recording", withCallMark(firstRunView(), true));
+  await expect(field(page, "recording.hotkey")).toBeVisible();
+  await expect(page.getByText(en("error.hotkey.unavailable"))).toHaveCount(0);
+  await expect(page.getByTestId("settings-errors")).toHaveCount(0);
+  await expect(field(page, "recording.hotkey")).not.toHaveAttribute("aria-invalid", "true");
+  await tab(page, "calls").click();
+  await expect(page.getByText(en("error.hotkey.unavailable"))).toHaveCount(1);
+});
+
+test("a view with call_hotkey_unavailable false leaves calls.hotkey unmarked", async ({ page }) => {
+  await open(page, "/settings?tab=calls", withCallMark(firstRunView(), false));
+  await expect(field(page, "calls.hotkey")).toBeVisible();
+  await expect(field(page, "calls.hotkey")).not.toHaveAttribute("aria-invalid", "true");
+  await expect(page.getByText(en("error.hotkey.unavailable"))).toHaveCount(0);
+});
+
+test("the unavailable mark stays while the call hotkey is edited, until a Saved view with false clears it", async ({ page }) => {
+  await open(page, "/settings?tab=calls", withCallMark(firstRunView(), true));
+  const hotkey = field(page, "calls.hotkey");
+  await expect(hotkey).toHaveAttribute("aria-invalid", "true");
+
+  await hotkey.press("Control+Alt+F10");
+  await expect(hotkey).toHaveValue("Ctrl+Alt+F10");
+  await expect(hotkey).toHaveAttribute("aria-invalid", "true");
+  await expect(page.getByText(en("error.hotkey.unavailable"))).toHaveCount(1);
+
+  // The save registered the new hotkey: core's Saved view carries false.
+  const saved = withCallMark(firstRunView(), false);
+  saved.settings.calls.hotkey = "Ctrl+Alt+F10";
+  await queueSaveOutcome(page, { Saved: { view: saved, warnings: [] } });
+  await page.getByTestId("settings-save").click();
+  const request = await lastSaveRequest(page);
+  expect(request.settings.calls.hotkey).toBe("Ctrl+Alt+F10");
+
+  await expect(savedStatus(page, en("settings.saved"))).toBeVisible();
+  await expect(hotkey).toHaveValue("Ctrl+Alt+F10");
+  await expect(hotkey).not.toHaveAttribute("aria-invalid", "true");
+  await expect(page.getByText(en("error.hotkey.unavailable"))).toHaveCount(0);
+});
+
+test("a save error of its own on calls.hotkey wins over the startup mark: its text only, once", async ({ page }) => {
+  await open(page, "/settings?tab=calls", withCallMark(firstRunView(), true));
+  await queueSaveOutcome(page, refusedCallHotkey("equals_dictation_call_side"));
+  await field(page, "calls.hotkey").press("Control+Alt+Space");
+  await page.getByTestId("settings-save").click();
+  await lastSaveRequest(page);
+
+  await expect(field(page, "calls.hotkey")).toHaveAttribute("aria-invalid", "true");
+  await expect(page.getByText(en("error.hotkey.equals_dictation"))).toHaveCount(1);
+  await expect(page.getByText(en("error.hotkey.unavailable"))).toHaveCount(0);
+});

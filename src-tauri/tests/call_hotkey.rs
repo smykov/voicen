@@ -448,6 +448,87 @@ fn a_taken_call_hotkey_at_startup_is_a_notice_only_and_a_resume_recovers_it() {
     );
 }
 
+/// The `call_hotkey_unavailable` key of a serialized `SettingsView` (T-232); `Null` when the
+/// key is missing, so a missing field is an assertion failure, not a compile error.
+fn unavailable_on_the_wire(view: impl serde::Serialize) -> Value {
+    serde_json::to_value(view).expect("serializes")["call_hotkey_unavailable"].clone()
+}
+
+#[test]
+fn a_taken_call_hotkey_at_startup_reaches_the_settings_view_until_a_save_moves_it() {
+    // T-232 (decisions #306, #373): the failure branch's field. With Ctrl+Alt+R taken by this
+    // thread before start, the managed `SettingsService`'s `view()` (what `settings_get` and
+    // `settings://changed` send) has `call_hotkey_unavailable == true`, and it stays true while
+    // a resume retries and fails; a save that leaves the call hotkey alone keeps it true in
+    // its Saved view (no re-registration); a save that moves `calls.hotkey` to the free
+    // Ctrl+Alt+F10 is Saved with the field false, the next `view()` reads false too and the
+    // shell's mark is cleared. Bite: the view field never filled from the shell's mark (always
+    // false), the handle's mark a different `Arc` than the thread's (the field stays false),
+    // the Saved view built before the commit (true after the move), the field cleared by a
+    // save that did not register the call slot, the field never cleared by the commit.
+    let _serial = serial();
+    assert_hotkey_free();
+    assert!(
+        combo_is_free(NEW_CALL_HOTKEY),
+        "premise: {NEW_CALL_HOTKEY} is free on the runner"
+    );
+    let taken = TakenHotkey::take_combo(CALL_HOTKEY).expect("premise: the test takes Ctrl+Alt+R");
+    let app = start(AppRig::new(EngineKind::Api));
+
+    assert!(
+        eventually(|| unavailable_on_the_wire(app.rig.service.view()) == Value::Bool(true)),
+        "view().call_hotkey_unavailable is not true while {CALL_HOTKEY} is taken: {}",
+        unavailable_on_the_wire(app.rig.service.view())
+    );
+    assert_eq!(
+        call_hotkey_mark(app.rig.app.handle()),
+        Some(FieldId::CallHotkey),
+        "the view and the shell's mark read one state"
+    );
+
+    // A resume while still taken fails again: the field stays true.
+    resume(hotkey_window());
+    assert!(
+        holds_for(SETTLE, || unavailable_on_the_wire(app.rig.service.view())
+            == Value::Bool(true)),
+        "a failing retry cleared the field"
+    );
+
+    // A save that does not touch the call hotkey does not re-register it: still true.
+    let outcome = app.save_with(|s| s.start_with_windows = !s.start_with_windows);
+    let SaveOutcome::Saved { view, .. } = outcome else {
+        panic!("expected Saved, got {outcome:?}");
+    };
+    assert_eq!(
+        unavailable_on_the_wire(view),
+        Value::Bool(true),
+        "the Saved view of an unrelated save dropped a mark that is still true"
+    );
+    assert_eq!(
+        call_hotkey_mark(app.rig.app.handle()),
+        Some(FieldId::CallHotkey)
+    );
+
+    // A save that moves the call hotkey to a free combination registers it and clears the mark.
+    let outcome = app.save_call_hotkey(NEW_CALL_HOTKEY);
+    let SaveOutcome::Saved { view, .. } = outcome else {
+        panic!("expected Saved, got {outcome:?}");
+    };
+    assert_eq!(
+        unavailable_on_the_wire(view),
+        Value::Bool(false),
+        "the Saved view after the call-slot commit still says unavailable"
+    );
+    assert_eq!(
+        unavailable_on_the_wire(app.rig.service.view()),
+        Value::Bool(false),
+        "the next view() after the successful save"
+    );
+    assert_eq!(call_hotkey_mark(app.rig.app.handle()), None);
+    app.assert_app_holds(NEW_CALL_HOTKEY, "after the save");
+    drop(taken);
+}
+
 // ---- (c) a save of calls.hotkey ------------------------------------------------------------
 
 #[test]

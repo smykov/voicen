@@ -270,11 +270,10 @@ pub fn start_dictation_with<R: Runtime>(
     // T-129: the call slot, before the registrar is attached (a save's `prepare_call`
     // finds the slot started). Its press only posts to the call worker, a no-op until
     // `call::start_calls` ran; a conflict is a notice and the mark only (I3).
-    let _ = app.manage(Arc::new(CallHotkeyMark::default()));
-    let mark = app
-        .try_state::<Arc<CallHotkeyMark>>()
-        .map(|mark| Arc::clone(&mark))
-        .unwrap_or_default();
+    // T-232: the mark is the registrar handle's own, so the managed state (read by
+    // `call_hotkey_mark`), the port and every `SettingsView` read one state.
+    let mark = hotkeys.call_mark();
+    let _ = app.manage(Arc::clone(&mark));
     let press_app = app.clone();
     let suspend_app = app.clone();
     let resume_app = app.clone();
@@ -300,8 +299,9 @@ pub fn start_dictation_with<R: Runtime>(
 
 /// The call-hotkey mark of `app`'s Calls tab (T-129, US9 #3): `Some(FieldId::CallHotkey)`
 /// while the call hotkey's registration is failing (at start, or after a resume or
-/// unlock), `None` otherwise and before [`start_dictation_with`] ran. Shell state only:
-/// no wire carries it to the settings window yet.
+/// unlock), `None` otherwise and before [`start_dictation_with`] ran. The same state
+/// reaches the settings window as `SettingsView::call_hotkey_unavailable` through the
+/// registrar handle that owns it (T-232).
 pub fn call_hotkey_mark<R: Runtime>(app: &AppHandle<R>) -> Option<FieldId> {
     app.try_state::<Arc<CallHotkeyMark>>()
         .and_then(|mark| mark.field())

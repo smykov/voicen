@@ -208,7 +208,9 @@ pub struct CallPort {
 
 /// The call-hotkey mark of the Calls tab (T-129, US9 #3): set while the call slot's
 /// registration is failing (startup, reassert), cleared once it is registered.
-/// Shell state only; no wire carries it yet.
+/// One per app: owned by [`HotkeyRegistrarHandle`] ([`HotkeyRegistrarHandle::call_mark`]),
+/// which reads it as [`HotkeyRegistrar::call_hotkey_unavailable`], so every
+/// `SettingsView` carries it as `call_hotkey_unavailable` (T-232).
 #[derive(Debug, Default)]
 pub struct CallHotkeyMark {
     failing: AtomicBool,
@@ -304,9 +306,12 @@ impl Drop for HotkeyThread {
 /// `start_dictation` (`DictationPorts::hotkeys`), which attaches the started hotkey
 /// thread. Fails closed: until a thread is attached, and once it has ended, every
 /// `prepare` is `Unavailable` (a save of a new hotkey is refused, never saved
-/// unregistered) and `commit` / `abort` do nothing.
+/// unregistered) and `commit` / `abort` do nothing. It owns the one
+/// [`CallHotkeyMark`] (T-232): `start_dictation` hands it to the call slot's
+/// [`CallPort`], and [`HotkeyRegistrar::call_hotkey_unavailable`] reads it.
 pub struct HotkeyRegistrarHandle {
     link: Mutex<Option<Link>>,
+    call_mark: Arc<CallHotkeyMark>,
 }
 
 /// Where the requests of an attached thread go, and the thread's log (for the
@@ -344,7 +349,14 @@ impl HotkeyRegistrarHandle {
     pub fn new() -> Arc<HotkeyRegistrarHandle> {
         Arc::new(HotkeyRegistrarHandle {
             link: Mutex::new(None),
+            call_mark: Arc::new(CallHotkeyMark::default()),
         })
+    }
+
+    /// The one call-hotkey mark (T-232): the state the call slot's [`CallPort`]
+    /// writes and [`HotkeyRegistrar::call_hotkey_unavailable`] reads.
+    pub fn call_mark(&self) -> Arc<CallHotkeyMark> {
+        Arc::clone(&self.call_mark)
     }
 
     /// Sends the later registrar calls to `thread` (`start_dictation`).
@@ -492,6 +504,11 @@ impl HotkeyRegistrar for HotkeyRegistrarHandle {
 
     fn abort(&self, prepared: Prepared) {
         self.abort_within(REQUEST_BUDGET, prepared);
+    }
+
+    /// T-232: the call slot is failing, read from the one [`CallHotkeyMark`].
+    fn call_hotkey_unavailable(&self) -> bool {
+        self.call_mark.field().is_some()
     }
 }
 

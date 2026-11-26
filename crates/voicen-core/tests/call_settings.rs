@@ -1056,3 +1056,131 @@ fn e2e_settings_wire_fixture_refused_call_hotkey_unavailable_matches_core() {
     );
     assert_fixture_key("refused_call_hotkey_unavailable", &wire);
 }
+
+// ---- T-232: `SettingsView.call_hotkey_unavailable` (decisions #306, #373) ------------
+//
+// The Calls tab marks the call hotkey after a startup registration conflict. The fact
+// lives in the hotkey thread; core reads it at build time in `view_with` through
+// `HotkeyRegistrar::call_hotkey_unavailable()` (default false), so view(), the Saved
+// view and the change bridge carry the same bool. The fake gets
+// `set_call_hotkey_unavailable(bool)` and clears the state when a call-slot
+// registration is committed (as the shell thread's `call_result(true)` does).
+
+fn unavailable_of(view: voicen_core::settings::service::SettingsView) -> Value {
+    serde_json::to_value(view).expect("serializes")["call_hotkey_unavailable"].clone()
+}
+
+#[track_caller]
+fn saved_view(outcome: SaveOutcome) -> voicen_core::settings::service::SettingsView {
+    match outcome {
+        SaveOutcome::Saved { view, .. } => view,
+        other => panic!("expected Saved, got {other:?}"),
+    }
+}
+
+#[test]
+fn view_carries_call_hotkey_unavailable_from_the_registrar() {
+    // The field is a bool on every view (never omitted): false by default, true while
+    // the registrar says the call slot is unavailable, in view() and in the Saved view
+    // of a save that does not touch the call hotkey; false again once cleared.
+    // Bite: view_with fills a constant false; the field read once at load; the Saved
+    // view built from the pre-save state.
+    let world = World::first_run();
+    let service = fixture_service(&world);
+    assert_eq!(unavailable_of(service.view()), json!(false));
+
+    world.hotkeys.set_call_hotkey_unavailable(true);
+    assert_eq!(unavailable_of(service.view()), json!(true), "view()");
+
+    let mut d = defaults(None);
+    d.api.base_url = "http://example.com/v1".into();
+    let view = saved_view(service.save(req(d)));
+    assert_eq!(
+        unavailable_of(view),
+        json!(true),
+        "an unrelated save leaves the call slot as it was: the Saved view still says true"
+    );
+    assert!(
+        !world
+            .hotkeys
+            .calls()
+            .iter()
+            .any(|c| matches!(c, RegistrarCall::PrepareCall(_))),
+        "the save must not have re-registered the call slot"
+    );
+
+    world.hotkeys.set_call_hotkey_unavailable(false);
+    assert_eq!(
+        unavailable_of(service.view()),
+        json!(false),
+        "cleared view()"
+    );
+    let mut d = defaults(None);
+    d.api.base_url = "http://example.com/v2".into();
+    assert_eq!(
+        unavailable_of(saved_view(service.save(req(d)))),
+        json!(false)
+    );
+}
+
+#[test]
+fn saved_view_after_a_call_slot_commit_reads_the_cleared_state() {
+    // A save that moves calls.hotkey to a free combination prepares and commits the
+    // call slot; the fake clears the state on that commit, and the Saved view (built
+    // after the commits) and the next view() say false. Bite: the Saved view reads the
+    // flag before the commits; view_with caches it.
+    let world = World::first_run();
+    let service = fixture_service(&world);
+    world.hotkeys.set_call_hotkey_unavailable(true);
+    assert_eq!(unavailable_of(service.view()), json!(true));
+
+    let mut d = defaults(None);
+    d.calls.hotkey = "Ctrl+Alt+F10".into();
+    let view = saved_view(service.save(req(d)));
+    let moved = parse_hotkey("Ctrl+Alt+F10").expect("valid hotkey");
+    assert!(
+        world
+            .hotkeys
+            .calls()
+            .iter()
+            .any(|c| matches!(c, RegistrarCall::Commit(h) if *h == moved)),
+        "the call slot was committed"
+    );
+    assert_eq!(
+        unavailable_of(view),
+        json!(false),
+        "Saved view after the commit"
+    );
+    assert_eq!(unavailable_of(service.view()), json!(false), "next view()");
+}
+
+#[test]
+fn a_dictation_slot_commit_does_not_clear_the_call_hotkey_mark() {
+    // Only a call-slot commit clears the state; moving the dictation hotkey leaves the
+    // call slot's failure standing. Bite: the fake (or the view) clearing on any commit.
+    let world = World::first_run();
+    let service = fixture_service(&world);
+    world.hotkeys.set_call_hotkey_unavailable(true);
+
+    let mut d = defaults(None);
+    d.hotkey = "Ctrl+Alt+F9".into();
+    let view = saved_view(service.save(req(d)));
+    assert_eq!(unavailable_of(view), json!(true), "Saved view");
+    assert_eq!(unavailable_of(service.view()), json!(true), "view()");
+}
+
+#[test]
+fn a_refused_call_hotkey_save_keeps_the_mark_in_the_view() {
+    // The failure branch of the save: the new call hotkey is taken too -> Refused, no
+    // commit, the call slot's old failure stands, the next view() still says true.
+    // Bite: a refused save clearing the state.
+    let world = World::first_run();
+    let service = fixture_service(&world);
+    world.hotkeys.set_call_hotkey_unavailable(true);
+    world.hotkeys.fail_prepare_call(true);
+
+    let mut d = defaults(None);
+    d.calls.hotkey = "Ctrl+Alt+F10".into();
+    expect_refused(service.save(req(d)));
+    assert_eq!(unavailable_of(service.view()), json!(true));
+}

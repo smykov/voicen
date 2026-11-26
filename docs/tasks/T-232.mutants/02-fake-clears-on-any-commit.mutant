@@ -1,0 +1,8 @@
+guarantee: AC-3/failure branch: a dictation-slot commit keeps the mark
+file: crates/voicen-core/src/hotkey_registrar.rs
+added_by: test-writer
+--- old
+        if state.call_tokens.contains(&prepared.token) {
+--- new
+        if true {
+--- end
