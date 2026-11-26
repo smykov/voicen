@@ -29,13 +29,23 @@
   });
 
   const providerHost = $derived(draft.baseline.provider_host);
+
+  // T-232 (decisions #306, #373): the saved view says the call slot's registration failed;
+  // the mark stays while the hotkey is edited until a Saved view clears it, and a draft
+  // error of its own on the field wins. Calls tab only, never inferred here.
+  const callHotkeyUnavailable: MessageId = "error.hotkey.unavailable";
+  const hotkeyErrors = $derived(
+    draft.baseline.call_hotkey_unavailable
+      ? { "calls.hotkey": callHotkeyUnavailable, ...draft.errors }
+      : draft.errors,
+  );
 </script>
 
 <HotkeyField
   bind:value={draft.settings.calls.hotkey}
   field="calls.hotkey"
   label="settings.field_label.calls.hotkey"
-  errors={draft.errors}
+  errors={hotkeyErrors}
   {warnings}
 />
 
