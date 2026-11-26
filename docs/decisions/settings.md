@@ -90,7 +90,7 @@ Tasks: T-003, T-032, T-030, T-014, T-004 (`SettingsView.unavailable`, the e2e wi
 
 - **Defect that produced it:** none yet (planned in T-003/T-032; research R-2).
 - **What breaks if you violate it:** a crash or a full disk mid-write leaves a truncated file, which the next start treats as unreadable and resets.
-- **Where it is enforced:** `FsSettingsFile::write_atomic` writes and syncs `settings.json.tmp`, then renames it over `settings.json`; `read` deletes a leftover `.tmp` and never parses it. Tests: `settings::file::tests::{write_atomic_replaces_and_leaves_no_tmp, leftover_tmp_is_deleted_and_never_read, failed_write_keeps_previous_file}`.
+- **Where it is enforced:** `FsSettingsFile::write_atomic` opens `settings.json.tmp` and hands it to core's one tail `voicen_core::files::fill_and_rename` (T-251; write, `sync_data` instead of the former `sync_all`, rename; same deviation as `docs/decisions/call-storage.md`), which renames it over `settings.json`; a tmp it could not open is left as found (as T-141 did for call); `read` deletes a leftover `.tmp` and never parses it. Tests: `settings::file::tests::{write_atomic_replaces_and_leaves_no_tmp, leftover_tmp_is_deleted_and_never_read, failed_write_keeps_previous_file}`.
 - **Don't:** write `settings.json` in place, or fall back to the `.tmp` when `settings.json` is missing.
 
 ### The bytes of an existing settings file are never destroyed (I4)

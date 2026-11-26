@@ -2,8 +2,10 @@
 //! contracts/core-traits.md#settingsfile). Only `SettingsService` uses it.
 
 use std::fs;
-use std::io::{self, Write};
+use std::io;
 use std::path::PathBuf;
+
+use crate::files::fill_and_rename;
 
 /// The settings file name inside the data directory (the one place it exists).
 pub const SETTINGS_FILE: &str = "settings.json";
@@ -45,15 +47,6 @@ impl FsSettingsFile {
         self.dir.join(TMP_FILE)
     }
 
-    fn write_tmp_and_rename(&self, bytes: &[u8]) -> io::Result<()> {
-        fs::create_dir_all(&self.dir)?;
-        let mut tmp = fs::File::create(self.tmp_path())?;
-        tmp.write_all(bytes)?;
-        tmp.sync_all()?;
-        drop(tmp);
-        fs::rename(self.tmp_path(), self.settings_path())
-    }
-
     /// Reserves `name` by creating it empty with `create_new` (atomic, never
     /// replaces a file), then renames the settings file over the reservation.
     /// `Ok(false)` = the name is taken.
@@ -90,15 +83,16 @@ impl SettingsFile for FsSettingsFile {
         }
     }
 
-    /// Creates the directory if needed, writes and syncs `settings.json.tmp`, then
-    /// renames it over `settings.json`. On failure the `.tmp` is removed (best
-    /// effort) and `settings.json` keeps its previous bytes.
+    /// Creates the directory if needed and opens `settings.json.tmp` (`File::create`: a tmp
+    /// left by a crash is replaced), then core's one tail [`fill_and_rename`] writes, syncs
+    /// its data and renames it over `settings.json`. On failure `settings.json` keeps its
+    /// previous bytes; a tmp this call opened is removed (best effort), one it could not
+    /// open is left as found.
     fn write_atomic(&self, bytes: &[u8]) -> io::Result<()> {
-        let result = self.write_tmp_and_rename(bytes);
-        if result.is_err() {
-            let _ = fs::remove_file(self.tmp_path());
-        }
-        result
+        fs::create_dir_all(&self.dir)?;
+        let tmp = self.tmp_path();
+        let file = fs::File::create(&tmp)?;
+        fill_and_rename(file, &tmp, &self.settings_path(), bytes)
     }
 
     /// Tries `settings.json.bad-<suffix>`, then `-1` … `-9`; a name is used only

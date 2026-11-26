@@ -1,0 +1,10 @@
+guarantee: I4: settings tmp it could not open is left as found
+file: crates/voicen-core/src/settings/file.rs
+added_by: test-writer
+--- old
+        let file = fs::File::create(&tmp)?;
+--- new
+        let file = fs::File::create(&tmp).inspect_err(|_| {
+            let _ = fs::remove_file(&tmp);
+        })?;
+--- end

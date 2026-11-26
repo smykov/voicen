@@ -1,0 +1,8 @@
+guarantee: I1: failed => failure is part of the shared predicate
+file: crates/voicen-core/src/call/storage.rs
+added_by: test-writer
+--- old
+        && (meta.state != CallState::Failed || meta.failure.is_some())
+--- new
+        && true
+--- end

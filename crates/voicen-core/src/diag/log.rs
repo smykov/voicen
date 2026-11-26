@@ -84,11 +84,7 @@ impl LogsUnwritableReason {
     /// on Windows a file in the middle of the path reports `NotFound` or
     /// `AlreadyExists`). Reads the file system (one `metadata` per path part).
     pub fn of(dir: &Path, err: &io::Error) -> LogsUnwritableReason {
-        let blocked_by_file = dir
-            .ancestors()
-            .find_map(|part| fs::metadata(part).ok())
-            .is_some_and(|meta| !meta.is_dir());
-        if blocked_by_file {
+        if crate::files::blocked_by_file(dir) {
             return LogsUnwritableReason::NotADirectory;
         }
         match err.kind() {

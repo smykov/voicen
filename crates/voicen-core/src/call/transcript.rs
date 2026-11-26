@@ -366,12 +366,19 @@ pub fn export_markdown(transcript: &TranscriptV1, title: &str, names: &[Speaker]
 
 /// The JSON of an export (FR-036): the compact [`TranscriptV1::to_json`] text of the transcript
 /// with `title` and `names` (from meta.json, FR-035) replacing its own; every other field is
-/// the transcript's.
-pub fn export_json(transcript: &TranscriptV1, title: &str, names: &[Speaker]) -> String {
+/// the transcript's. It is also the text of `transcript.json` on every write that carries the
+/// meta.json names. The value serialized must pass [`TranscriptV1::validate`] (T-251, decision
+/// #372): a segment speaker `names` lacks is that error, and no text is produced.
+pub fn export_json(
+    transcript: &TranscriptV1,
+    title: &str,
+    names: &[Speaker],
+) -> Result<String, (InvalidRule, u32)> {
     let mut named = transcript.clone();
     named.title = title.to_string();
     named.speakers = names.to_vec();
-    named.to_json()
+    named.validate()?;
+    Ok(named.to_json())
 }
 
 /// Why a call title or a speaker name was refused (T-152, FR-035).
@@ -1802,7 +1809,7 @@ mod tests {
         // that does not parse back or fails validate().
         let t = load(FULL);
         let names = renamed_names();
-        let text = match export_json(&t, "Renamed call", &names).text() {
+        let text = match export_json(&t, "Renamed call", &names).ok() {
             Some(text) => text,
             None => panic!("the export of valid names is refused"),
         };
@@ -1824,25 +1831,6 @@ mod tests {
         );
     }
 
-    /// T-251: `export_json` returns a `String` before the change and a
-    /// `Result<String, (InvalidRule, u32)>` after it. The tests read it through this, so they
-    /// compile on both sides and fail on behaviour (the text of a refusal is `None`).
-    trait ExportText {
-        fn text(self) -> Option<String>;
-    }
-
-    impl ExportText for String {
-        fn text(self) -> Option<String> {
-            Some(self)
-        }
-    }
-
-    impl ExportText for Result<String, (InvalidRule, u32)> {
-        fn text(self) -> Option<String> {
-            self.ok()
-        }
-    }
-
     #[test]
     fn export_json_refuses_a_segment_speaker_missing_from_names() {
         // T-251 I2 (owner decision #372): the value export_json serializes passes validate();
@@ -1855,13 +1843,13 @@ mod tests {
             id: "me".into(),
             name: "Alice".into(),
         }];
-        assert_eq!(export_json(&t, "t", &only_me).text(), None, "s1 missing");
+        assert_eq!(export_json(&t, "t", &only_me).ok(), None, "s1 missing");
         let only_s1 = vec![Speaker {
             id: "s1".into(),
             name: "Bob".into(),
         }];
-        assert_eq!(export_json(&t, "t", &only_s1).text(), None, "me missing");
-        assert_eq!(export_json(&t, "t", &[]).text(), None, "no names at all");
+        assert_eq!(export_json(&t, "t", &only_s1).ok(), None, "me missing");
+        assert_eq!(export_json(&t, "t", &[]).ok(), None, "no names at all");
     }
 
     #[test]
@@ -1875,7 +1863,7 @@ mod tests {
             id: "s2".into(),
             name: "Carol".into(),
         });
-        let text = match export_json(&t, "t", &names).text() {
+        let text = match export_json(&t, "t", &names).ok() {
             Some(text) => text,
             None => panic!("an extra speaker is refused"),
         };

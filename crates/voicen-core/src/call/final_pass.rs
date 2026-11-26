@@ -63,8 +63,8 @@ use crate::call::storage::{
 use crate::call::transcript::export_json;
 use crate::call::{
     merge, render_markdown, CallId, CallMeta, CallNotice, CallState, ChunkInput, DecodeEnd,
-    EngineRef, FailReason, FinalOutcome, FinalStage, MergeInput, PassMode, SegmentV1, StorageKind,
-    Track, TrackInput, TrackResult, TranscriptV1, VadFallbackCause,
+    EngineRef, FailReason, FinalOutcome, FinalStage, InvalidRule, MergeInput, PassMode, SegmentV1,
+    StorageKind, Track, TrackInput, TrackResult, TranscriptV1, VadFallbackCause,
 };
 use crate::clock::MonotonicClock;
 use crate::diag::event::LogEvent;
@@ -1427,34 +1427,49 @@ fn write_ready(
     };
     match written {
         Ok(()) => FinalOutcome::Ready,
-        Err((kind, e)) => {
+        Err(ReadyWriteError::Invalid(rule, segment)) => {
+            events.log(LogEvent::TranscriptInvalid { rule, segment });
+            failed(meta)
+        }
+        Err(ReadyWriteError::Storage(kind, e)) => {
             storage_failed(events, kind, &e);
             failed(meta)
         }
     }
 }
 
+/// Why [`write_ready_files`] stopped.
+enum ReadyWriteError {
+    /// The transcript with the names on disk does not validate (T-251): nothing was written.
+    Invalid(InvalidRule, u32),
+    /// A write failed, with the storage kind of the file.
+    Storage(StorageKind, io::Error),
+}
+
 /// The writes of [`write_ready`], with `meta`'s names: `transcript.md`, `transcript.json`
-/// (the transcript with `meta`'s title and speakers), then `meta.json` as `ready`. The first
-/// failure stops it with the storage kind of the file.
+/// (the transcript with `meta`'s title and speakers), then `meta.json` as `ready`. A
+/// `transcript.json` text that does not validate stops it before any write; the first failed
+/// write stops it with the storage kind of the file.
 fn write_ready_files(
     dir: &Path,
     meta: &mut CallMeta,
     transcript: &TranscriptV1,
     mode: PassMode,
-) -> Result<(), (StorageKind, io::Error)> {
+) -> Result<(), ReadyWriteError> {
     let markdown = render_markdown(transcript, &meta.title, &meta.speakers);
-    let json = export_json(transcript, &meta.title, &meta.speakers);
+    let json = export_json(transcript, &meta.title, &meta.speakers)
+        .map_err(|(rule, segment)| ReadyWriteError::Invalid(rule, segment))?;
     for (name, bytes) in [
         (TRANSCRIPT_MD_FILE, markdown.into_bytes()),
         (TRANSCRIPT_FILE, json.into_bytes()),
     ] {
-        write_atomic(dir, name, &bytes).map_err(|e| (StorageKind::Transcript, e))?;
+        write_atomic(dir, name, &bytes)
+            .map_err(|e| ReadyWriteError::Storage(StorageKind::Transcript, e))?;
     }
     meta.state = CallState::Ready;
     meta.failure = None;
     meta.pass_mode = Some(mode);
-    write_meta(dir, meta).map_err(|e| (StorageKind::Meta, e))
+    write_meta(dir, meta).map_err(|e| ReadyWriteError::Storage(StorageKind::Meta, e))
 }
 
 // ---- the queue (T-146) ----------------------------------------------------------------

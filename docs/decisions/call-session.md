@@ -80,7 +80,7 @@ Tasks: T-126; T-144 (I12); T-145 (I12 Sleep notice, D1-D5); T-149 (device change
   - Notices (of the effective reason): `MaxLength`, `LowDisk`, `StorageError` and (since T-145, D1) `Sleep` give `CallNotice::Stopped { reason }`; `User`, `Hotkey`, `Exit` and `SystemEnd` give `CallSavedTranscribing`. Before T-145 `Sleep` gave `CallSavedTranscribing`, offered at once, before the machine slept; the spec wants `stopped{sleep}` on wake (data-model notices table, quickstart 6, US4 #9). The shell holds the `Sleep` notice and the pass hand-off until the resume (`docs/decisions/windows-shell.md`, call part at exit); core only reports. Tests: `stop_closes_both_files_readable_and_reports_it` (the `sleep` row; mutants `docs/tasks/T-145.mutants/`).
   - `next_deadline` is now after a failure; otherwise the minimum of the reminder, the next poll and the 4 h limit, never more than 10 s ahead while recording, `None` otherwise.
   - Every end of a call (`finish`, a start that fails after the create) calls `CallStore::release` on its folder.
-  - `CallDeps.open_track` returns `TrackFile = Box<dyn SyncWrite + Send>` (`impl SyncWrite for Box<W: ?Sized>` in `codec.rs`), so the rig's `FlakyOpener::fail_next_write` injects a write fault.
+  - `CallDeps.open_track` returns `TrackFile = Box<dyn SyncWrite + Send>` (`impl SyncWrite for Box<W: ?Sized>` in `files.rs`, re-exported from `call::codec`), so the rig's `FlakyOpener::fail_next_write` injects a write fault.
 - **Don't:** stop a call from the writer thread, write `meta.json` after a write failure, poll the disk on a fixed grid, or raise the low-disk warning twice.
 
 ## Developer-level decisions of T-145 (the reviewer may overturn)

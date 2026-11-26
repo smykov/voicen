@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use super::CallSettings;
+use crate::files::blocked_by_file;
 
 /// The file the probe creates and deletes in a root (research R19).
 pub const WRITE_PROBE_FILE: &str = ".voicen-write-probe";
@@ -47,7 +48,8 @@ pub trait CallRoots: Send + Sync {
 ///
 /// Probe order: a relative path is `relative` (the disk is not touched); the default
 /// root is created (`create_dir_all`, the app's own folder); any other root must
-/// exist (`missing`) and be a folder (`not_a_folder`) and is never created; then the
+/// exist (`missing`) and be a folder (`not_a_folder`, also when a regular file is anywhere
+/// up its path) and is never created; then the
 /// probe file is created or truncated (not `create_new`, so a probe left by a crash
 /// does not block) and removed. Each io error goes through [`reason_of`].
 #[derive(Debug, Clone)]
@@ -70,10 +72,19 @@ impl CallRoots for FsCallRoots {
         if !root.is_absolute() {
             return Err(UnwritableReason::Relative);
         }
+        // A regular file anywhere up the path is `not_a_folder` on every OS (T-251): Windows
+        // reports it as "path not found" (or, for the create, "already exists").
+        let located = |e: io::Error| {
+            if blocked_by_file(root) {
+                UnwritableReason::NotAFolder
+            } else {
+                reason_of(e.kind())
+            }
+        };
         if root == self.default_root {
-            fs::create_dir_all(root).map_err(|e| reason_of(e.kind()))?;
+            fs::create_dir_all(root).map_err(located)?;
         }
-        let meta = fs::metadata(root).map_err(|e| reason_of(e.kind()))?;
+        let meta = fs::metadata(root).map_err(located)?;
         if !meta.is_dir() {
             return Err(UnwritableReason::NotAFolder);
         }
