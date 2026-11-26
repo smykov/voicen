@@ -170,6 +170,7 @@ fn dictation(app: &App) -> Dictation {
             temp_audio: Arc::new(FakeTempAudioStore::new()),
             observer: observer.clone(),
             post_processor: Arc::new(PassThrough),
+            transcript_sink: Arc::new(voicen_core::pipeline::DiscardTranscripts),
         },
         engine_factory: None,
         builtin: Some(app.deps.clone()),

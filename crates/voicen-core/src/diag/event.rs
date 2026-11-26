@@ -16,6 +16,7 @@ use crate::call::{
 use crate::connection_test::ConnectionTestResult;
 use crate::delivery::DeliveryResult;
 use crate::events::PostProcessTrace;
+use crate::history::{HistoryError, HistoryErrorKind, HistoryOp};
 use crate::local_models::residency::Warmth;
 use crate::recording::MicCause;
 use crate::settings::gate::Blocked;
@@ -135,6 +136,13 @@ pub enum LogEvent {
     /// a process that starts dictation, naming the detector its speech gate holds. A
     /// closed tag, never the model's path.
     VadDetector { detector: DetectorTag },
+    /// `history_failed op=<load|save|delete> kind=<HistoryFailKind>` (WARN; T-022, spec
+    /// 005 FR-010, FR-011): a history disk operation failed. The operation and a closed
+    /// kind only, never a path, an OS message or entry text (FR-20).
+    HistoryFailed {
+        op: HistoryOp,
+        kind: HistoryFailKind,
+    },
 }
 
 /// A logged previous-session verdict (T-100): `PreviousSession` without `Clean`.
@@ -151,6 +159,15 @@ pub enum PreviousSessionLine {
 }
 
 impl LogEvent {
+    /// The line of a history disk error (T-022): its operation and kind through
+    /// [`HistoryFailKind::of`].
+    pub fn history_failed(error: &HistoryError) -> LogEvent {
+        LogEvent::HistoryFailed {
+            op: error.op,
+            kind: HistoryFailKind::of(&error.kind),
+        }
+    }
+
     /// The load line of `outcome`; the backup file name and the settings are
     /// dropped.
     pub fn settings_load(outcome: &LoadOutcome) -> LogEvent {
@@ -230,8 +247,8 @@ pub enum SaveLine {
 
 /// The kinds of a `Warning` line: the pipeline's `WarningCode`s and the shell's
 /// start, settings-window, tray, hotkey, dictation-start, overlay and
-/// logs-folder failures, a hotkey-thread request timeout and a call-hotkey
-/// registration failure.
+/// logs-folder failures, a hotkey-thread request timeout, a call-hotkey
+/// registration failure and a failed history start.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WarningKind {
     /// `events::WarningCode::VadFallback`.
@@ -296,6 +313,10 @@ pub enum WarningKind {
     /// dictation started (T-209, FR-032): an I/O error or the calls-roots guard
     /// refused; the next start retries.
     PendingAudioCleanupFailed,
+    /// The transcript history could not be started (T-022): the app already had a
+    /// history part, or one of its threads could not be started. The app runs on
+    /// without a history (nothing is recorded); dictation is unaffected.
+    HistoryStartFailed,
 }
 
 /// One dictation: the engine, the outcome and the FR-20 timings plus the
@@ -385,6 +406,36 @@ impl EngineTag {
             "builtin" => EngineTag::Builtin,
             "local_server" => EngineTag::LocalServer,
             _ => EngineTag::Other,
+        }
+    }
+}
+
+/// A history error's kind through the table (T-022): `corrupt`, the common
+/// `io::ErrorKind`s of a file in the data directory, else `other`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HistoryFailKind {
+    Corrupt,
+    NotFound,
+    PermissionDenied,
+    NotADirectory,
+    ReadOnly,
+    StorageFull,
+    Other,
+}
+
+impl HistoryFailKind {
+    /// `Corrupt` stays `Corrupt`; an I/O kind outside the table is `Other`.
+    pub fn of(kind: &HistoryErrorKind) -> HistoryFailKind {
+        match kind {
+            HistoryErrorKind::Corrupt => HistoryFailKind::Corrupt,
+            HistoryErrorKind::Io(io) => match *io {
+                std::io::ErrorKind::NotFound => HistoryFailKind::NotFound,
+                std::io::ErrorKind::PermissionDenied => HistoryFailKind::PermissionDenied,
+                std::io::ErrorKind::NotADirectory => HistoryFailKind::NotADirectory,
+                std::io::ErrorKind::ReadOnlyFilesystem => HistoryFailKind::ReadOnly,
+                std::io::ErrorKind::StorageFull => HistoryFailKind::StorageFull,
+                _ => HistoryFailKind::Other,
+            },
         }
     }
 }

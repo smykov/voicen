@@ -350,6 +350,7 @@ fn start_session(rig: &Rig, audio: Arc<dyn AudioSource>) -> Arc<DictationSession
             temp_audio: Arc::new(FakeTempAudioStore::new()),
             observer: Arc::new(RecordingObserver::new()),
             post_processor: Arc::new(PassThrough),
+            transcript_sink: Arc::new(voicen_core::pipeline::DiscardTranscripts),
         },
         engine_factory: None,
         builtin: None,

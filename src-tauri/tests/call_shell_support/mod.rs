@@ -216,7 +216,7 @@ impl WavSource {
     /// T-266: the tracks are fed in stamp order: every opened track is stepped together, one
     /// block (`BLOCK_MS`) at a time, so the latest stamp fed to one track never leads another
     /// track's by more than one block (below the writer's 200 ms hold-off; a whole span per
-    /// track in turn let `Writer::advance` zero-fill the lagging live track, F-036 draft).
+    /// track in turn let `Writer::advance` zero-fill the lagging live track, F-037).
     pub fn pump_for(&self, ms: u64) {
         let opened = lock(&self.opened);
         let mut step: u64 = 0;

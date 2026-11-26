@@ -1,0 +1,9 @@
+guarantee: AC-2 UI: history off -> "History is off", no entries shown
+file: src/lib/history/HistoryList.svelte
+added_by: test-writer
+test: node scripts/ui-test-select.mjs src/lib/history e2e/history.spec.ts
+--- old
+  {#if !view.enabled}
+--- new
+  {#if view.entries.length < 0}
+--- end

@@ -16,7 +16,7 @@ Keep the last N delivered final transcripts (text, time, engine) in `%LOCALAPPDA
 
 **Storage**: one JSON document `history.json` in the data folder, atomic write via `history.json.tmp` + rename; no encryption (R2, R3)
 
-**Testing**: `cargo test -p voicen-core` in Docker (temp dirs, fault-injecting fake store); vitest for UI logic; Playwright with mocked IPC and a pushed `history-changed` event; `cargo test --workspace` on `windows-latest`; owner's manual check
+**Testing**: `cargo test -p voicen-core` in Docker (temp dirs, fault-injecting fake store); vitest for UI logic; Playwright with mocked IPC and a pushed `history://changed` event; `cargo test --workspace` on `windows-latest`; owner's manual check
 
 **Target Platform**: Windows 10/11 x64 (core and UI logic verified on the Linux dev host)
 
@@ -99,7 +99,7 @@ crates/voicen-core/
 src-tauri/src/
 ├── lib.rs                        # register commands, manage Mutex<History>, open at startup
 └── history.rs                    # history_get/copy/clear, show_history_window, history_on_delivered,
-                                  # history_on_settings_applied, emit history-changed
+                                  # history_on_settings_applied, emit history://changed
 
 src/
 ├── routes/history/+page.svelte   # History window
@@ -109,7 +109,7 @@ src/
     ├── format.test.ts
     └── HistoryList.svelte        # list, entry, copy, expand, clear, states
 
-e2e/history.spec.ts               # mocked IPC incl. pushed history-changed events
+e2e/history.spec.ts               # mocked IPC incl. pushed history://changed events
 ```
 
 **Structure Decision**: the existing three-part layout (core library, Tauri shell, web UI) from `CLAUDE.md`; history adds one core module, one shell module, one route and one e2e spec.

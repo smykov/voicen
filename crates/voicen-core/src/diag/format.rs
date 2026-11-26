@@ -28,8 +28,8 @@ use std::fmt::{Display, Write as _};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::event::{
-    DetectorTag, DictationLine, DictationOutcome, EndTag, EngineTag, FailureTag, LoadKind,
-    LogEvent, PreviousSessionLine, SaveLine, TestConnectionLine, WarningKind,
+    DetectorTag, DictationLine, DictationOutcome, EndTag, EngineTag, FailureTag, HistoryFailKind,
+    LoadKind, LogEvent, PreviousSessionLine, SaveLine, TestConnectionLine, WarningKind,
 };
 use crate::autostart::ReconcileAction;
 use crate::build_info::BuildInfo;
@@ -40,6 +40,7 @@ use crate::call::{
 };
 use crate::clock::{civil_from_days, days_from_civil};
 use crate::events::{PostProcessResult, SkipKind};
+use crate::history::HistoryOp;
 use crate::local_models::residency::Warmth;
 use crate::recording::MicCause;
 use crate::settings::gate::Blocked;
@@ -236,7 +237,8 @@ fn level(event: &LogEvent) -> &'static str {
         | LogEvent::CallTrackDropped { .. }
         | LogEvent::CallSwitchRefused { .. }
         | LogEvent::VadFallback { .. }
-        | LogEvent::TranscriptInvalid { .. } => WARN,
+        | LogEvent::TranscriptInvalid { .. }
+        | LogEvent::HistoryFailed { .. } => WARN,
         LogEvent::CallDeviceChanged { to, .. } => match to {
             Some(_) => INFO,
             None => WARN,
@@ -422,6 +424,11 @@ fn write_message(out: &mut String, event: &LogEvent) {
         LogEvent::VadDetector { detector: tag } => {
             out.push_str("vad");
             pair(out, "detector", detector(*tag));
+        }
+        LogEvent::HistoryFailed { op, kind } => {
+            out.push_str("history_failed");
+            pair(out, "op", history_op(*op));
+            pair(out, "kind", history_fail_kind(*kind));
         }
     }
 }
@@ -752,6 +759,7 @@ fn warning_kind(kind: WarningKind) -> &'static str {
         WarningKind::TestConnectionFailed => "test_connection_failed",
         WarningKind::HotkeyRequestTimeout => "hotkey_request_timeout",
         WarningKind::PendingAudioCleanupFailed => "pending_audio_cleanup_failed",
+        WarningKind::HistoryStartFailed => "history_start_failed",
     }
 }
 
@@ -825,6 +833,27 @@ fn stop_reason(reason: StopReason) -> &'static str {
         StopReason::MaxLength => "max_length",
         StopReason::LowDisk => "low_disk",
         StopReason::StorageError => "storage_error",
+    }
+}
+
+/// `HistoryOp` to its literal (one per variant), from this table, not `as_str`.
+fn history_op(op: HistoryOp) -> &'static str {
+    match op {
+        HistoryOp::Load => "load",
+        HistoryOp::Save => "save",
+        HistoryOp::Delete => "delete",
+    }
+}
+
+fn history_fail_kind(kind: HistoryFailKind) -> &'static str {
+    match kind {
+        HistoryFailKind::Corrupt => "corrupt",
+        HistoryFailKind::NotFound => "not_found",
+        HistoryFailKind::PermissionDenied => "permission_denied",
+        HistoryFailKind::NotADirectory => "not_a_directory",
+        HistoryFailKind::ReadOnly => "read_only",
+        HistoryFailKind::StorageFull => "storage_full",
+        HistoryFailKind::Other => "other",
     }
 }
 

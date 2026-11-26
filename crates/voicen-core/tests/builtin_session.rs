@@ -221,6 +221,7 @@ fn rig(
             temp_audio: temp.clone(),
             observer: observer.clone(),
             post_processor: Arc::new(PassThrough),
+            transcript_sink: Arc::new(voicen_core::pipeline::DiscardTranscripts),
         },
         engine_factory: factory,
         builtin: Some(BuiltinDeps {

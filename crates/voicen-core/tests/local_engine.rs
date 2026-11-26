@@ -186,6 +186,7 @@ impl Rig {
             temp_audio: temp,
             observer,
             post_processor: Arc::new(PassThrough),
+            transcript_sink: Arc::new(voicen_core::pipeline::DiscardTranscripts),
         };
         let residency = Arc::clone(&self.residency);
         let store = Arc::clone(&self.store);

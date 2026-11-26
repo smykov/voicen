@@ -67,7 +67,9 @@ export function setLanguage(lang: UiLanguage): void {
  * `fieldLabelId` (`settings.field_label.<FieldId>`); there is no `string`-typed
  * renderer (docs/decisions/i18n.md).
  * Called in a Svelte template or effect, it re-runs when the language changes.
+ * `lang` renders in that language instead of the current one (a pure formatter that is
+ * given its language, e.g. `$lib/history/format::engineLabel`); the id stays `MessageId`.
  */
-export function t(id: MessageId, args: MessageArgs = {}): string {
-  return text(realCatalog, currentLanguage(), id, args);
+export function t(id: MessageId, args: MessageArgs = {}, lang?: UiLanguage): string {
+  return text(realCatalog, lang ?? currentLanguage(), id, args);
 }

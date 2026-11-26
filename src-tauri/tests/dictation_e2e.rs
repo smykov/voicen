@@ -98,6 +98,7 @@ fn a_hotkey_hold_through_the_real_wiring_pastes_the_transcript_into_the_window()
             hotkeys: Arc::clone(&rig.hotkeys),
             detector: Err(voicen_core::vad::VadError::Unavailable),
             temp_audio: Arc::new(voicen_core::platform::FakeTempAudioStore::new()),
+            history: voicen_lib::dictation::HistorySink::Discard,
         },
     )
     .expect("start_dictation");
@@ -187,6 +188,7 @@ fn esc_through_the_real_wiring_discards_the_recording() {
             hotkeys: Arc::clone(&rig.hotkeys),
             detector: Err(voicen_core::vad::VadError::Unavailable),
             temp_audio: Arc::new(voicen_core::platform::FakeTempAudioStore::new()),
+            history: voicen_lib::dictation::HistorySink::Discard,
         },
     )
     .expect("start_dictation");
@@ -406,6 +408,7 @@ fn dictate_once(
             hotkeys: Arc::clone(&rig.hotkeys),
             detector: Err(voicen_core::vad::VadError::Unavailable),
             temp_audio: Arc::new(voicen_core::platform::FakeTempAudioStore::new()),
+            history: voicen_lib::dictation::HistorySink::Discard,
         },
     )
     .expect("start_dictation");
@@ -663,6 +666,7 @@ fn clip_ports(
         hotkeys: Arc::clone(&rig.hotkeys),
         detector,
         temp_audio: Arc::new(voicen_core::platform::FakeTempAudioStore::new()),
+        history: voicen_lib::dictation::HistorySink::Discard,
     }
 }
 

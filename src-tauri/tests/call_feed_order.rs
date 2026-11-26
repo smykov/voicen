@@ -1,4 +1,4 @@
-//! T-266 (F-036 draft; docs/tasks/T-266.md): the WAV harness of the shell call tests feeds the
+//! T-266 (F-037; docs/tasks/T-266.md): the WAV harness of the shell call tests feeds the
 //! two call tracks in stamp order. `WavSource::pump_for` and `WavSource::pump` step the opened
 //! tracks together, so the latest stamp fed to one track never leads the other's by more than one
 //! block (20 ms). That is below the writer's 200 ms hold-off: after a wall-clock pause longer

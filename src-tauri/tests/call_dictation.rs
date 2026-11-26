@@ -153,6 +153,7 @@ impl Rig {
                 hotkeys: Arc::clone(&rig.hotkeys),
                 detector: Err(voicen_core::vad::VadError::Unavailable),
                 temp_audio: Arc::new(FakeTempAudioStore::new()),
+                history: voicen_lib::dictation::HistorySink::Discard,
             },
             notifier.clone(),
         )
