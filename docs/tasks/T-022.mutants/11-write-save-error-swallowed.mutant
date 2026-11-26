@@ -1,0 +1,12 @@
+guarantee: C7: a save failure keeps the entry, sets SaveFailed and is returned for the log (never silent)
+file: crates/voicen-core/src/history/mod.rs
+added_by: test-writer
+--- old
+            Err(error) => {
+                self.pending = Some(Pending::Write);
+                self.notice = Some(HistoryNotice::SaveFailed);
+                Some(error)
+            }
+--- new
+            Err(_error) => None,
+--- end

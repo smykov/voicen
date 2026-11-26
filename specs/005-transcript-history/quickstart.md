@@ -28,12 +28,12 @@ pnpm test -- src/lib/history
 pnpm e2e -- e2e/history.spec.ts
 ```
 
-The e2e mock defines `window.__TAURI_INTERNALS__.invoke` for `history_get`, `history_copy`, `history_clear`, 004's open-settings command and `plugin:event|listen`; it keeps the registered callback (via `transformCallback`) to push `history-changed` payloads.
+The e2e mock defines `window.__TAURI_INTERNALS__.invoke` for `history_get`, `history_copy`, `history_clear`, 004's open-settings command and `plugin:event|listen`; it keeps the registered callback (via `transformCallback`) to push `history://changed` payloads.
 
 Expected:
 - 20 entries listed newest first with preview, local time and "API · whisper-1" (US1-AS1); 100 entries render in < 1 s (SC-005, indicative).
 - Copy → `history_copy` called with the id, "Copied" for 2 s; `clipboard_unavailable` → "Could not copy — try again" (US1-AS2, FR-018).
-- A pushed `history-changed` with a new entry appears at the top; one with `enabled: false` switches to "History is off" (US1-AS3, edge case).
+- A pushed `history://changed` with a new entry appears at the top; one with `enabled: false` switches to "History is off" (US1-AS3, edge case).
 - Clear → empty state; `notice: "delete_failed"` → the alert (US2).
 - Off state → "Open settings" invokes 004's command with the History tab; no `history_*` reads beyond `history_get` (FR-012).
 - All of it with UI language `ru` shows Russian texts; keyboard-only Tab/Enter reaches every action (FR-013, FR-017).

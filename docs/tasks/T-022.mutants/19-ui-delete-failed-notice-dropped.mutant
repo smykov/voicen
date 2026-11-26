@@ -1,0 +1,9 @@
+guarantee: AC-2 UI failure: a clear whose disk deletion failed -> delete_failed alert (swallowed at the render site)
+file: src/lib/history/HistoryList.svelte
+added_by: test-writer
+test: node scripts/ui-test-select.mjs src/lib/history e2e/history.spec.ts
+--- old
+{#if view !== null && view.notice !== null}
+--- new
+{#if view !== null && view.notice === "save_failed"}
+--- end

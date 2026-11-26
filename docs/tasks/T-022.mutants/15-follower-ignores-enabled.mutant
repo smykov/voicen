@@ -1,0 +1,8 @@
+guarantee: AC-2: history turned off in the settings -> stored entries deleted (the follower applies history.enabled)
+file: crates/voicen-core/src/history/mod.rs
+added_by: test-writer
+--- old
+        recorder.apply_settings(settings.history.enabled, settings.history.size);
+--- new
+        recorder.apply_settings(true, settings.history.size);
+--- end

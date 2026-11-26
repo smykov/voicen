@@ -1,5 +1,7 @@
 //! T-052 invariant 4 and the real-runtime half of invariant 3, on tauri's real Wry
 //! runtime (WebView2) driven from a libtest thread. Windows CI only (decision #5).
+//! Also T-022's "a destroyed History window is built again", which needs the real
+//! loop's `WindowEvent::Destroyed` to free the label (the mock runtime never emits it).
 //!
 //! - The loop runs with `Builder::any_thread` and `App::run_return`, never `run`
 //!   (`run` ends in `process::exit`, tao 0.37.1 event_loop.rs:221-227, which would
@@ -38,7 +40,7 @@ use voicen_core::diag::Log;
 use voicen_core::local_models::catalog::MODELS;
 use voicen_core::local_models::service::LocalModels;
 use voicen_core::local_models::store::ModelStore;
-use voicen_core::platform::Indicator;
+use voicen_core::platform::{Clipboard, FakeClipboard, Indicator};
 use voicen_core::recording::{OverlayState, TrayState};
 use voicen_core::secrets::{CredentialStore, FakeCredentialStore};
 use voicen_core::settings::LoadOutcome;
@@ -958,4 +960,102 @@ fn the_tray_exit_item_ends_the_loop_with_code_0() {
         "`{TRAY_WINDOW_CLASS}` window(s) {left:?} still exist after the tray Exit: a copy of \
          the icon outlived tauri's exit cleanup, so the icon stays in the notification area"
     );
+}
+
+#[derive(Debug, Default)]
+struct HistoryReopenReport {
+    started: bool,
+    first: bool,
+    destroyed: bool,
+    gone: bool,
+    second: bool,
+    second_path: Option<String>,
+    history_windows: usize,
+    log: Vec<String>,
+}
+
+#[test]
+fn a_destroyed_history_window_is_built_again_by_the_next_open() {
+    // T-022 Acceptance 1 (T013 "close destroys it"), on the real runtime: tauri drops a
+    // window from its manager only when the loop delivers `WindowEvent::Destroyed`
+    // (tauri 2.12.1 app.rs `on_event_loop_event` -> manager `on_window_close`), which
+    // the mock runtime never emits (test/mock_runtime.rs `DestroyWindow`), so this is
+    // the one place the guarantee can be observed (Windows CI run 45649199635). After the
+    // History window is destroyed its label is free, and the next `open_history` builds a
+    // fresh one at `/history`, still one. Bite: an opener that keeps a handle of the dead
+    // window and focuses it (no window ever again), or one that refuses a label it has
+    // seen.
+    let _serial = serial();
+    let _watchdog = watchdog("a_destroyed_history_window_is_built_again_by_the_next_open");
+    let dir = TempDir::new();
+    let (app, outcome) = wry_app(dir.path(), Start::Loaded);
+    let logs_of = dir.path().to_path_buf();
+    let history_dir = dir.path().join("history-data");
+
+    let (code, report) = run_with_driver(app, outcome, move |handle| {
+        let label = voicen_lib::history::LABEL;
+        let clipboard: Arc<dyn Clipboard> = Arc::new(FakeClipboard::new());
+        let mut report = HistoryReopenReport {
+            started: voicen_lib::history::start_history(&handle, history_dir, clipboard).is_ok(),
+            ..HistoryReopenReport::default()
+        };
+        if report.started {
+            voicen_lib::history::open_history(&handle);
+            report.first = eventually(|| handle.get_webview_window(label).is_some());
+        }
+        if report.first {
+            report.destroyed = handle
+                .get_webview_window(label)
+                .is_some_and(|w| w.destroy().is_ok());
+            report.gone = eventually(|| handle.get_webview_window(label).is_none());
+        }
+        if report.gone {
+            voicen_lib::history::open_history(&handle);
+            report.second = eventually(|| handle.get_webview_window(label).is_some());
+            // On Wry `url()` is WebView2's `Source`: `about:blank` (path `blank`) until the
+            // build's asynchronous `Navigate` updates it (wry 0.57.0 webview2 `url_from_webview`,
+            // Windows CI run 45657766119), so the path is awaited, and the last one read is
+            // what the assertion sees.
+            let path_now = || {
+                handle
+                    .get_webview_window(label)
+                    .and_then(|w| w.url().ok())
+                    .map(|url| url.path().to_string())
+            };
+            eventually(|| path_now().as_deref() == Some("/history"));
+            report.second_path = path_now();
+            report.history_windows = handle
+                .webview_windows()
+                .keys()
+                .filter(|l| l.as_str() == label)
+                .count();
+        }
+        if !report.second {
+            report.log = logged(&logs_of);
+        }
+        end_loop(&handle, 0);
+        report
+    });
+
+    let report = report.expect("the driver sent no report");
+    assert!(report.started, "premise: start_history failed: {report:?}");
+    assert!(
+        report.first,
+        "premise: the first open built no history window: {report:?}"
+    );
+    assert!(
+        report.destroyed && report.gone,
+        "premise: the destroyed history window is still listed: {report:?}"
+    );
+    assert!(
+        report.second,
+        "the next open after the close built no history window: {report:?}"
+    );
+    assert_eq!(
+        report.second_path.as_deref(),
+        Some("/history"),
+        "{report:?}"
+    );
+    assert_eq!(report.history_windows, 1, "{report:?}");
+    assert_eq!(code, 0, "run_return code after end_loop(0)");
 }
