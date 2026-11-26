@@ -25,11 +25,13 @@ use voicen_core::connection_test::ConnectionTestResult;
 use voicen_core::delivery::DeliveryResult;
 use voicen_core::diag::{
     format_line, CrashFileName, DetectorTag, DictationLine, DictationOutcome, EndTag, EngineTag,
-    FailureTag, LoadKind, LogEvent, OsVersion, PreviousSessionLine, SaveLine, WarningKind,
+    FailureTag, HistoryFailKind, LoadKind, LogEvent, OsVersion, PreviousSessionLine, SaveLine,
+    WarningKind,
 };
 use voicen_core::engine::engine_for;
 use voicen_core::events::{PostProcessResult, PostProcessTrace, SkipKind};
 use voicen_core::failure::{FailureReason, TimeoutOrigin};
+use voicen_core::history::{HistoryError, HistoryErrorKind, HistoryOp};
 use voicen_core::recording::MicCause;
 use voicen_core::secrets::{FakeCredentialStore, KeySlot};
 use voicen_core::settings::gate::Blocked;
@@ -338,6 +340,8 @@ fn all_warning_kinds() -> Vec<(WarningKind, &'static str)> {
         ),
         // T-220: the call part could not be started (`start_calls` returned an Err).
         (WarningKind::CallStartFailed, "call_start_failed"),
+        // T-022: the transcript history could not be started.
+        (WarningKind::HistoryStartFailed, "history_start_failed"),
     ];
     let seen: BTreeSet<usize> = all
         .iter()
@@ -363,9 +367,10 @@ fn all_warning_kinds() -> Vec<(WarningKind, &'static str)> {
             WarningKind::DictationWorkerStopped => 18,
             WarningKind::CallHotkeyRegisterFailed => 19,
             WarningKind::CallStartFailed => 20,
+            WarningKind::HistoryStartFailed => 21,
         })
         .collect();
-    assert_eq!(seen.len(), 21, "every WarningKind once");
+    assert_eq!(seen.len(), 22, "every WarningKind once");
     all
 }
 
@@ -673,9 +678,10 @@ fn every_event() -> Vec<LogEvent> {
             LogEvent::TranscriptInvalid { .. } => 23,
             LogEvent::VadDetector { .. } => 24,
             LogEvent::CallTrackDropped { .. } => 25,
+            LogEvent::HistoryFailed { .. } => 26,
         })
         .collect();
-    assert_eq!(seen.len(), 26, "every LogEvent variant is enumerated");
+    assert_eq!(seen.len(), 27, "every LogEvent variant is enumerated");
     all
 }
 
@@ -875,7 +881,102 @@ fn call_events() -> Vec<LogEvent> {
     for detector in [DetectorTag::Silero, DetectorTag::Energy, DetectorTag::Other] {
         all.push(LogEvent::VadDetector { detector });
     }
+    for (op, _) in HISTORY_OPS_ALL {
+        for (kind, _) in HISTORY_FAIL_KINDS_ALL {
+            all.push(LogEvent::HistoryFailed { op, kind });
+        }
+    }
     all
+}
+
+/// T-022: every history operation and failure kind with its log literal, by a
+/// wildcard-free match (a new variant fails to compile here).
+const HISTORY_OPS_ALL: [(HistoryOp, &str); 3] = [
+    (HistoryOp::Load, "load"),
+    (HistoryOp::Save, "save"),
+    (HistoryOp::Delete, "delete"),
+];
+const HISTORY_FAIL_KINDS_ALL: [(HistoryFailKind, &str); 7] = [
+    (HistoryFailKind::Corrupt, "corrupt"),
+    (HistoryFailKind::NotFound, "not_found"),
+    (HistoryFailKind::PermissionDenied, "permission_denied"),
+    (HistoryFailKind::NotADirectory, "not_a_directory"),
+    (HistoryFailKind::ReadOnly, "read_only"),
+    (HistoryFailKind::StorageFull, "storage_full"),
+    (HistoryFailKind::Other, "other"),
+];
+
+#[test]
+fn history_failed_lines_carry_the_op_and_a_closed_kind_only() {
+    // T-022 (spec 005 FR-010, FR-011, FR-20): a history disk error is logged as
+    // `WARN history_failed op=<op> kind=<kind>`, every op and kind from the table, an
+    // I/O kind outside it as `other`. Bite: a literal swapped, INFO instead of WARN,
+    // an unknown io kind mapped to a named one, Corrupt logged as an io kind.
+    for (op, o) in HISTORY_OPS_ALL {
+        match op {
+            HistoryOp::Load | HistoryOp::Save | HistoryOp::Delete => {}
+        }
+        for (kind, k) in HISTORY_FAIL_KINDS_ALL {
+            match kind {
+                HistoryFailKind::Corrupt
+                | HistoryFailKind::NotFound
+                | HistoryFailKind::PermissionDenied
+                | HistoryFailKind::NotADirectory
+                | HistoryFailKind::ReadOnly
+                | HistoryFailKind::StorageFull
+                | HistoryFailKind::Other => {}
+            }
+            assert_eq!(
+                level_and_body(&LogEvent::HistoryFailed { op, kind }),
+                format!("WARN history_failed op={o} kind={k}")
+            );
+        }
+    }
+    let cases = [
+        (HistoryErrorKind::Corrupt, HistoryFailKind::Corrupt),
+        (
+            HistoryErrorKind::Io(std::io::ErrorKind::NotFound),
+            HistoryFailKind::NotFound,
+        ),
+        (
+            HistoryErrorKind::Io(std::io::ErrorKind::PermissionDenied),
+            HistoryFailKind::PermissionDenied,
+        ),
+        (
+            HistoryErrorKind::Io(std::io::ErrorKind::NotADirectory),
+            HistoryFailKind::NotADirectory,
+        ),
+        (
+            HistoryErrorKind::Io(std::io::ErrorKind::ReadOnlyFilesystem),
+            HistoryFailKind::ReadOnly,
+        ),
+        (
+            HistoryErrorKind::Io(std::io::ErrorKind::StorageFull),
+            HistoryFailKind::StorageFull,
+        ),
+        (
+            HistoryErrorKind::Io(std::io::ErrorKind::TimedOut),
+            HistoryFailKind::Other,
+        ),
+        (
+            HistoryErrorKind::Io(std::io::ErrorKind::Other),
+            HistoryFailKind::Other,
+        ),
+    ];
+    for (error_kind, want) in cases {
+        let what = format!("{error_kind:?}");
+        assert_eq!(
+            LogEvent::history_failed(&HistoryError {
+                op: HistoryOp::Save,
+                kind: error_kind,
+            }),
+            LogEvent::HistoryFailed {
+                op: HistoryOp::Save,
+                kind: want,
+            },
+            "{what}"
+        );
+    }
 }
 
 /// `"<LEVEL> <message>"` of an event: what follows the 29-character timestamp.

@@ -1,0 +1,17 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "history",
+  "description": "Capability for the History window (label `history`, created only by the history part's opener thread, src-tauri/src/history.rs, T-022): listen to and stop listening to events (history://changed, settings://changed), invoke the three history_* commands its page uses, settings_get (the page reads the UI language) and settings_open (the off state's \"Open settings\" button, tab history). Nothing else: the page never shows, closes or destroys its window (least privilege, decision #45; app commands are ACL-checked per label, T-049, docs/decisions/ipc-acl.md).",
+  "windows": [
+    "history"
+  ],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "allow-settings-get",
+    "allow-settings-open",
+    "allow-history-get",
+    "allow-history-copy",
+    "allow-history-clear"
+  ]
+}

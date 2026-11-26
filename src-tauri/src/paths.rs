@@ -1,5 +1,5 @@
 //! The one data-directory resolver (T-030 J2, P-010; architecture.md: "shell (one
-//! function)"). Logs, settings and the built-in models (later history) derive from it.
+//! function)"). Logs, settings, the built-in models and the history derive from it.
 
 use std::path::{Path, PathBuf};
 

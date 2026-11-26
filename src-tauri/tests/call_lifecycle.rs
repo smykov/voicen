@@ -1074,6 +1074,7 @@ fn start_hot() -> Hot {
             hotkeys: Arc::clone(&rig.hotkeys),
             detector: Err(voicen_core::vad::VadError::Unavailable),
             temp_audio: Arc::new(voicen_core::platform::FakeTempAudioStore::new()),
+            history: voicen_lib::dictation::HistorySink::Discard,
         },
         notifier.clone(),
     )

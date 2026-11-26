@@ -1,0 +1,8 @@
+guarantee: AC-1: 25 dictations with N = 20 -> the 20 latest shown (a delivered text enters the history)
+file: crates/voicen-core/src/pipeline.rs
+added_by: test-writer
+--- old
+                            self.deps.transcript_sink.delivered(&text, engine);
+--- new
+                            let _ = engine;
+--- end

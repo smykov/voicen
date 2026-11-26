@@ -504,7 +504,11 @@ fn the_call_indicator_window_reaches_its_three_commands_past_the_acl() {
     let others = settings_commands()
         .into_iter()
         .chain(calls_commands())
-        .chain([("overlay_ready", json!({}))]);
+        .chain(history_commands())
+        .chain([
+            ("overlay_ready", json!({})),
+            ("settings_open", json!({ "tab": "not-a-tab" })),
+        ]);
     for (cmd, args) in others {
         assert_refused(&window, cmd, args);
     }
@@ -523,9 +527,10 @@ fn call_indicator_commands_are_refused_from_settings_overlay_calls_and_any_other
     let settings = settings_window(&app);
     let overlay = window_at(&app, OVERLAY, "overlay");
     let calls = window_at(&app, CALLS, "calls");
+    let history = window_at(&app, HISTORY, "history");
     let other = window_at(&app, OTHER, "call-indicator");
 
-    for window in [&settings, &overlay, &calls, &other] {
+    for window in [&settings, &overlay, &calls, &history, &other] {
         for (cmd, args) in indicator_commands() {
             assert_refused(window, cmd, args);
         }
@@ -565,7 +570,8 @@ fn the_call_indicator_capability_grants_exactly_the_indicator_set_to_its_label_o
     // show/hide/close/destroy/set_position (the page never touches its window; a tao setter on
     // the raw-shown window would hide it, overlay.md §3), no settings or calls command. Bite: any
     // extra permission, a second window label or a wildcard, a missing grant. APP_COMMANDS
-    // (build.rs) lists the three commands: 19 in all.
+    // (build.rs) lists the three commands: 23 in all with T-022's four (history_* and
+    // settings_open).
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let text = std::fs::read_to_string(root.join("capabilities").join("call-indicator.json"))
         .expect("capabilities/call-indicator.json exists");
@@ -592,8 +598,9 @@ fn the_call_indicator_capability_grants_exactly_the_indicator_set_to_its_label_o
 
     let build = std::fs::read_to_string(root.join("build.rs")).expect("build.rs");
     assert!(
-        build.contains("const APP_COMMANDS: [&str; 19]"),
-        "APP_COMMANDS holds 19 commands (16 + the three call_indicator_*)"
+        build.contains("const APP_COMMANDS: [&str; 23]"),
+        "APP_COMMANDS holds 23 commands (16 + the three call_indicator_* + T-022's history_get, \
+         history_copy, history_clear and settings_open)"
     );
     for cmd in [
         "call_indicator_state",
@@ -609,4 +616,139 @@ fn the_call_indicator_capability_grants_exactly_the_indicator_set_to_its_label_o
         !build.contains("call_indicator_moved"),
         "call_indicator_moved is dropped (decisions #314)"
     );
+}
+
+/// The History window's label (T-022, `capabilities/history.json`).
+const HISTORY: &str = "history";
+
+/// The three commands of the History page (spec 005 contracts/ipc.md), each with args that have
+/// no side effect: a read, an id no list holds (`not_found`), a clear of an empty list.
+fn history_commands() -> Vec<(&'static str, Value)> {
+    vec![
+        ("history_get", json!({})),
+        ("history_copy", json!({ "id": 0 })),
+        ("history_clear", json!({})),
+    ]
+}
+
+#[test]
+fn the_history_window_reaches_its_commands_and_settings_get_past_the_acl() {
+    // T-022 (spec 005 T013; red today: no `history` capability, no history_* command; not run on
+    // Linux, Windows CI only): from a window labelled `history` at `/history`, each history_*
+    // command and `settings_get` (the page reads the UI language) reach their handler: a value or
+    // the command's own error, never an ACL refusal or "not found". Its other settings commands
+    // and the calls_* commands stay refused. Bite: `allow-history-*` missing from
+    // capabilities/history.json, a command missing from APP_COMMANDS or from
+    // `generate_handler!`, `allow-settings-get` not granted to `history`, or `history.json`
+    // granting `allow-settings-save` or `allow-calls-*`.
+    let _serial = serial();
+    let dir = TempDir::new();
+    let app = release_app(&load(dir.path()));
+    let window = window_at(&app, HISTORY, "history");
+
+    for (cmd, args) in history_commands() {
+        if let Err(rejection) = invoke(&window, cmd, args) {
+            assert!(
+                !is_acl_refusal(&rejection),
+                "{cmd} refused by the ACL for `{HISTORY}`: {rejection}"
+            );
+            assert!(
+                !is_not_found(&rejection),
+                "{cmd} is not registered: {rejection}"
+            );
+        }
+    }
+    let view = invoke(&window, "settings_get", json!({}))
+        .unwrap_or_else(|e| panic!("settings_get rejected for `{HISTORY}`: {e}"));
+    assert!(view.get("settings").is_some(), "settings_get: {view}");
+
+    for (cmd, args) in settings_commands() {
+        if cmd != "settings_get" {
+            assert_refused(&window, cmd, args);
+        }
+    }
+    for (cmd, args) in calls_commands().into_iter().chain(indicator_commands()) {
+        assert_refused(&window, cmd, args);
+    }
+}
+
+#[test]
+fn history_commands_are_refused_from_settings_overlay_calls_and_any_other_window() {
+    // T-022 (red today: the commands are not registered, so the refusal is "not found", not the
+    // ACL's; Windows CI only): each history_* command from `settings`, `overlay`, `calls` and a
+    // window labelled `other` is refused by the ACL before its handler (the history texts
+    // are not for any other page). Bite: `allow-history-*` also in default.json, overlay.json
+    // or calls.json, a window wildcard in history.json.
+    let _serial = serial();
+    let dir = TempDir::new();
+    let app = release_app(&load(dir.path()));
+    let settings = settings_window(&app);
+    let overlay = window_at(&app, OVERLAY, "overlay");
+    let calls = window_at(&app, CALLS, "calls");
+    let indicator = window_at(&app, CALL_INDICATOR, "call-indicator");
+    let other = window_at(&app, OTHER, "history");
+
+    for window in [&settings, &overlay, &calls, &indicator, &other] {
+        for (cmd, args) in history_commands() {
+            assert_refused(window, cmd, args);
+        }
+    }
+}
+
+#[test]
+fn settings_get_passes_from_the_history_window_and_stays_refused_from_other_and_overlay() {
+    // T-022: `settings_get` passes from `history` too (T-142 added `calls`); `overlay` and
+    // `other` stay refused. Windows CI only.
+    let _serial = serial();
+    let dir = TempDir::new();
+    let app = release_app(&load(dir.path()));
+    let overlay = window_at(&app, OVERLAY, "overlay");
+    let other = window_at(&app, OTHER, "settings");
+    let history = window_at(&app, HISTORY, "history");
+
+    assert_refused(&overlay, "settings_get", json!({}));
+    assert_refused(&other, "settings_get", json!({}));
+    assert!(
+        invoke(&history, "settings_get", json!({})).is_ok(),
+        "settings_get must pass from `history`"
+    );
+}
+
+#[test]
+fn settings_open_passes_from_the_history_window_only() {
+    // T-022 (the History page's "Open settings" sends `settings_open { tab: "history" }`,
+    // pinned by e2e/history.spec.ts; Windows CI only): from `history` the command reaches its
+    // handler (a token outside the tabs answers the handler's own `unknown_tab`, so nothing
+    // opens), from `settings`, `overlay`, `calls` and `other` the ACL refuses it. Bite:
+    // `allow-settings-open` missing from capabilities/history.json, `settings_open` missing
+    // from APP_COMMANDS or `generate_handler!`, or granted to another label.
+    let _serial = serial();
+    let dir = TempDir::new();
+    let app = release_app(&load(dir.path()));
+    let history = window_at(&app, HISTORY, "history");
+    let args = json!({ "tab": "not-a-tab" });
+
+    let rejection = invoke(&history, "settings_open", args.clone())
+        .expect_err("an unknown tab is the handler's own error");
+    assert!(
+        !is_acl_refusal(&rejection),
+        "settings_open refused by the ACL for `{HISTORY}`: {rejection}"
+    );
+    assert!(
+        !is_not_found(&rejection),
+        "settings_open is not registered: {rejection}"
+    );
+    assert!(
+        rejection.to_string().contains("unknown_tab"),
+        "settings_open: {rejection}"
+    );
+
+    let settings = settings_window(&app);
+    let overlay = window_at(&app, OVERLAY, "overlay");
+    let calls = window_at(&app, CALLS, "calls");
+    let indicator = window_at(&app, CALL_INDICATOR, "call-indicator");
+    let other = window_at(&app, OTHER, "history");
+    for window in [&settings, &overlay, &calls, &indicator, &other] {
+        assert_refused(window, "settings_open", args.clone());
+    }
 }

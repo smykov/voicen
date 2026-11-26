@@ -40,7 +40,7 @@ The stack is fixed by `docs/requirements.md` §9 (Tauri 2, Rust 1.99, Svelte 5, 
 
 ## R7. Concurrency and live updates
 
-- **Decision**: The shell holds `Mutex<History>` in Tauri managed state. After every change, the shell emits one Tauri event `history-changed` with the full `HistoryView` to the History window if it exists. The window loads with `history_get` and then replaces its state with each event payload.
+- **Decision**: The shell holds `Mutex<History>` in Tauri managed state. After every change, the shell emits one Tauri event `history://changed` with the full `HistoryView` to the History window if it exists. The window loads with `history_get` and then replaces its state with each event payload.
 - **Rationale**: ≤ 2 MB payload, at most a few changes per minute; sending the full view avoids diff bugs and makes "the window shows exactly the stored state" one assertion. A mutex is enough: operations are short and never nested.
 - **Alternatives**: incremental events (entry-added / entry-removed) — more states to test; polling — wasteful and laggy.
 
@@ -76,7 +76,7 @@ The stack is fixed by `docs/requirements.md` §9 (Tauri 2, Rust 1.99, Svelte 5, 
 
 ## R13. Verification placement
 
-- **Decision**: core rules and file behaviour → Linux host, `cargo test -p voicen-core` with `tempfile`-style temp dirs (std `env::temp_dir` + unique subfolder, or the `tempfile` dev-dependency) and a fault-injecting fake store; UI states → vitest + Playwright with mocked IPC (`window.__TAURI_INTERNALS__`, including a mocked `history-changed` event); shell wiring (tray item, window, real clipboard marks, real `%LOCALAPPDATA%` path, rename on NTFS) → Windows CI `cargo test --workspace` plus the owner's manual check (requirements §9, UI verification row).
+- **Decision**: core rules and file behaviour → Linux host, `cargo test -p voicen-core` with `tempfile`-style temp dirs (std `env::temp_dir` + unique subfolder, or the `tempfile` dev-dependency) and a fault-injecting fake store; UI states → vitest + Playwright with mocked IPC (`window.__TAURI_INTERNALS__`, including a mocked `history://changed` event); shell wiring (tray item, window, real clipboard marks, real `%LOCALAPPDATA%` path, rename on NTFS) → Windows CI `cargo test --workspace` plus the owner's manual check (requirements §9, UI verification row).
 - **Rationale**: constitution V; decisions #5.
 
 No NEEDS CLARIFICATION remains.
