@@ -218,9 +218,12 @@ impl Assets<Wry> for Page {
 
 /// T-267: a page whose first frame is late. The body starts white (unpainted, as WebView2's
 /// surface is before its first composition) and turns [`PAGE_RGB`] `paint_after` later from a
-/// `setTimeout`; `None` never turns it. It reacts to mousedown like [`Page`].
+/// `setTimeout`; `None` never turns it. With `mousedown` it turns [`DOWN_RGB`] on a mousedown like
+/// [`Page`]; without it (T-272) the page answers nothing, so a driver that clicks and waits for the
+/// pixel after a failed premise waits its full HANG.
 struct LatePage {
     paint_after: Option<Duration>,
+    mousedown: bool,
 }
 
 impl LatePage {
@@ -233,11 +236,18 @@ impl LatePage {
                 after.as_millis()
             )
         });
+        let down = if self.mousedown {
+            format!(
+                "document.addEventListener('mousedown',function(){{\
+                 document.body.style.background='rgb({dr},{dg},{db})';}});"
+            )
+        } else {
+            String::new()
+        };
         format!(
             "<!doctype html><html><head><meta charset=\"utf-8\"></head>\
              <body style=\"margin:0;width:100vw;height:100vh;background:rgb(255,255,255)\">\
-             <script>{paint}document.addEventListener('mousedown',function(){{\
-             document.body.style.background='rgb({dr},{dg},{db})';}});</script>\
+             <script>{paint}{down}</script>\
              </body></html>"
         )
     }
@@ -926,6 +936,7 @@ fn s4_a_slow_first_paint_does_not_fail_the_page_premise() {
         "s4_a_slow_first_paint_does_not_fail_the_page_premise",
         LatePage {
             paint_after: Some(Duration::from_millis(1500)),
+            mousedown: true,
         },
     );
 }
@@ -937,10 +948,16 @@ fn s4_a_page_that_never_paints_fails_with_the_premise_not_the_watchdog() {
     // the poll's HANG bound (120 s), not by the 240 s watchdog (exit code 3, which would not be
     // this panic) and not by a later message (`the click did not reach the page`). This passes on
     // a single sample too (it fails at once); it bites a poll that skips the premise, swallows
-    // its failure, or runs the click and later waits (3 x 120 s) after it failed.
+    // its failure, or runs the click and later waits (3 x 120 s) after it failed. T-272: the page
+    // also ignores mousedown (`mousedown: false`), so a click answers nothing: a driver that keeps
+    // the premise verdict but still clicks and waits (the `painted` poll alone is a second HANG)
+    // ends at the 240 s watchdog (exit code 3), not at the premise panic.
     s4_driver(
         "s4_a_page_that_never_paints_fails_with_the_premise_not_the_watchdog",
-        LatePage { paint_after: None },
+        LatePage {
+            paint_after: None,
+            mousedown: false,
+        },
     );
 }
 
