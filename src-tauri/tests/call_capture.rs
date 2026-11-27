@@ -235,7 +235,7 @@ fn assert_opens_on_the_now_timeline(track: Track, device: TrackDevice, label: &s
         "{label}: a loss with no error: {:?}",
         sink.losses()
     );
-    println!(
+    timing_support::report(&format!(
         "T-127 fact: {label} opened (endpoint {endpoint:?}); {} blocks in 300 ms, first {:?} last {:?}, \
          rate/channels {:?}, now() window [{}, {}] ns",
         blocks.len(),
@@ -244,7 +244,7 @@ fn assert_opens_on_the_now_timeline(track: Track, device: TrackDevice, label: &s
         blocks.first().map(|b| (b.2, b.3)),
         before.ns(),
         after.ns()
-    );
+    ));
 }
 
 /// The no-endpoint branch: the open is `NoDevice` and nothing reaches the sink.
@@ -259,7 +259,9 @@ fn assert_no_device(track: Track, device: TrackDevice, label: &str) {
     thread::sleep(Duration::from_millis(100));
     assert!(sink.blocks().is_empty(), "{label}: blocks reached the sink");
     assert!(sink.losses().is_empty(), "{label}: a loss reached the sink");
-    println!("T-127 fact: {label}: the host has no such endpoint, open = NoDevice");
+    timing_support::report(&format!(
+        "T-127 fact: {label}: the host has no such endpoint, open = NoDevice"
+    ));
 }
 
 // ---- 1. the failure branch (Acceptance 1, 5) ---------------------------------------------
@@ -542,7 +544,9 @@ fn the_free_disk_space_of_the_temp_dir_is_a_positive_number() {
         .available_bytes(&child)
         .unwrap_or_else(|e| panic!("available_bytes({child:?}) failed: {:?}", e.kind()));
     assert!(for_child > 0, "no free bytes reported for {child:?}");
-    println!("T-127 fact: {available} bytes free on the volume of {temp:?}");
+    timing_support::report(&format!(
+        "T-127 fact: {available} bytes free on the volume of {temp:?}"
+    ));
 }
 
 // ---- 6. a WAV source through the session (Acceptance 2) ------------------------------------

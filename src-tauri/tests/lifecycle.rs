@@ -101,10 +101,10 @@ fn watchdog(test: &'static str) -> Watchdog {
     let (tx, rx) = mpsc::channel::<()>();
     thread::spawn(move || {
         if let Err(RecvTimeoutError::Timeout) = rx.recv_timeout(WATCHDOG) {
-            eprintln!(
+            timing_support::report(&format!(
                 "lifecycle watchdog: `{test}`: the event loop did not return within \
                  {WATCHDOG:?}; ending the test exe"
-            );
+            ));
             std::process::exit(3);
         }
     });
@@ -294,7 +294,9 @@ fn ready_opened(handle: &AppHandle<Wry>) -> ReadyOpen {
     let probe = voicen_lib::settings_window::request_with(handle, Box::new(|_| Ok(())));
     let (answered, waited) = measure(|| probe.wait_timeout(OPENER_HANG).is_some());
     let window = answered && handle.get_webview_window(LABEL).is_some();
-    eprintln!("lifecycle: Ready's first-run open probe answered={answered} after {waited:?}");
+    timing_support::report(&format!(
+        "lifecycle: Ready's first-run open probe answered={answered} after {waited:?}"
+    ));
     ReadyOpen {
         answered,
         window,
@@ -511,7 +513,9 @@ fn overlay_built(handle: &AppHandle<Wry>) -> OverlayBuilt {
         window: receipt.is_some() && handle.get_webview_window(OVERLAY).is_some(),
         waited,
     };
-    eprintln!("lifecycle: overlay receipt {receipt:?} after {waited:?}");
+    timing_support::report(&format!(
+        "lifecycle: overlay receipt {receipt:?} after {waited:?}"
+    ));
     built
 }
 

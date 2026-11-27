@@ -845,7 +845,7 @@ fn test_connection_refused_loopback_port_is_cannot_reach() {
     // invoke would then never resolve or reject), saves nothing (no credential
     // write or delete, settings.json byte-identical, no settings://changed), keeps
     // the typed key out of the response, and writes R-11's line without the host
-    // (choice (iv)). The address is core's `OsAnswer::refused()` (`127.0.0.1:1`,
+    // (choice (iv)). The address is core's `OsAnswer::refused()` (a loopback port
     // below every ephemeral range, probed refused at use; F-004, decision #53,
     // T-080 I1), never a bound-and-released port. Bite: the command not
     // registered, a sync body, the request built from the saved settings, a save

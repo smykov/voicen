@@ -170,12 +170,13 @@ check-serena-pin:
 	scripts/ci/serena-pin.test.sh
 	scripts/ci/serena-pin.sh
 
-# check-core-test-os-answer (T-080 rca, class os-answer-deadline-race; T-089, decides_on: token):
-# no core test outside crates/voicen-core/tests/common names an OS-answer target (.invalid,
-# 127.0.0.1:1, 192.0.2.1), any case, comments included; targets come with their deadlines from
-# tests/common (docs/decisions/core-tests.md, I1). The self-test runs the tripwire
-# scripts/ci/core-test-os-answer.sh on scripts/ci/fixtures/core-test-os-answer/ and the real
-# tests dir. Host bash.
+# check-core-test-os-answer (T-080 rca, class os-answer-deadline-race; T-089, decides_on: token;
+# T-175 option B for the shell): no core test outside crates/voicen-core/tests/common, and no
+# shell test (src-tauri/tests), names an OS-answer target (.invalid, 127.0.0.1:1, 192.0.2.1), any
+# case, comments included; targets come with their deadlines from core's tests/common
+# (docs/decisions/core-tests.md, I1). The self-test runs the tripwire
+# scripts/ci/core-test-os-answer.sh on scripts/ci/fixtures/core-test-os-answer/ and on the two
+# real tests dirs (crates/voicen-core/tests, src-tauri/tests). Host bash.
 check-core-test-os-answer:
 	scripts/ci/core-test-os-answer.test.sh
 

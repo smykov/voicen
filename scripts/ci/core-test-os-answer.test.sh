@@ -3,7 +3,9 @@
 # T-080 rca, class os-answer-deadline-race) guard of the guard: the tripwire
 # scripts/ci/core-test-os-answer.sh must give its documented exit code on every committed fixture
 # tests dir under scripts/ci/fixtures/core-test-os-answer/<case>/, on two cases built here (no
-# dir, a dir without *.rs) and on the real crates/voicen-core/tests.
+# dir, a dir without *.rs), on the real crates/voicen-core/tests, on the real src-tauri/tests
+# (T-175, option B) and on the premise of that run: src-tauri/tests has no common/ dir, which the
+# guard would exempt.
 #
 # The rule (docs/decisions/core-tests.md, invariant I1), over every *.rs under the tests dir,
 # recursively, except the top-level <dir>/common/ tree: no line names an OS-answer target, as a
@@ -107,6 +109,22 @@ run c-no-rs-files 3 "cannot run" "$tmp/no-rs"
 # The real tree with the guard's default (crates/voicen-core/tests): red until the comment lines
 # naming a target outside tests/common are reworded (T-089 §7).
 run "real tree (crates/voicen-core/tests)" 0 "ok:"
+
+# T-175 (option B, shell I1): the same token rule over the shell tests, every *.rs recursively,
+# no exempt dir. The shell's refused case comes from OsAnswer::refused() (settings_ipc.rs,
+# dictation_e2e.rs), and comments name the constructor, not the literal.
+run "real tree (src-tauri/tests)" 0 "ok:" src-tauri/tests
+
+# Premise of that run (review r1 #3): the guard exempts "$dir"/common/* for any dir, so a
+# src-tauri/tests/common/ would be silently exempt. The shell tests include core's common
+# through #[path], they have none of their own; this case fails when one appears.
+if [ -e src-tauri/tests/common ]; then
+  echo "FAIL premise: src-tauri/tests/common exists; the guard exempts it, so the shell run above does not read it" >&2
+  failed=$((failed + 1))
+else
+  echo "ok   premise: src-tauri/tests has no common/ dir"
+  passed=$((passed + 1))
+fi
 
 # Every committed fixture dir is in the table.
 for d in "$fx"/*/; do

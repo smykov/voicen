@@ -18,21 +18,32 @@
 //!
 //! T-074 (decision #91 follow-up 1): the same hold with post-processing enabled through a
 //! settings save, so the post-processor `start_dictation` itself installs runs. The chat
-//! endpoint is a raw-TCP loopback mock ([`ChatMock`]) answering every request with a
-//! fixed reply; the failure branch points the base URL at `127.0.0.1:1`
-//! ([`refused_loopback`], the refused-address rule of decision #53, probed at each call),
-//! with connect 5 s and post-processing 10 s so the refusal (~2.2 s on windows-latest,
-//! decision #56), not a timer, ends the request. Fake key only; the transcript, the
-//! reply, the prompt and the key must never reach the log.
+//! endpoint is a raw-TCP loopback mock ([`ChatMock`], on the shared stoppable
+//! `loopback_support::LoopbackServer`, T-175) answering every request with a fixed reply;
+//! the failure branch points the base URL at core's refused case,
+//! `common::os_answer::OsAnswer::refused()` (decision #53, probed at each call; T-175, I1),
+//! with the case's own connect and post-processing deadlines, so the refusal, not a timer,
+//! ends the request. Fake key only; the transcript, the reply, the prompt and the key must
+//! never reach the log.
 #![cfg(windows)]
 
+/// Core's test helpers: the one refused case, its probe and its deadlines
+/// (`common::os_answer::OsAnswer`; T-080, T-175; docs/decisions/core-tests.md), one copy for
+/// the core and the shell tests, as `settings_ipc.rs` includes it.
+#[path = "../../crates/voicen-core/tests/common/mod.rs"]
+mod common;
+mod loopback_support;
+/// The checks of `OsAnswer::refused()`, run in the process that relies on it.
+#[path = "../../crates/voicen-core/tests/common/refused_addr_tests.rs"]
+mod refused_addr_tests;
 mod timing_support;
 mod win32_support;
 
 use std::fs;
 use std::io::{self, Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::TcpStream;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -47,6 +58,7 @@ use voicen_core::settings::EngineKind;
 use voicen_core::test_support::fixtures;
 use voicen_core::test_support::realtime::RealtimeSource;
 use voicen_core::test_support::TempDir;
+use voicen_core::timeouts::Timeouts;
 use voicen_core::vad::silero_model::SILERO_MODEL;
 use voicen_core::vad::{SpeechDetector, VadError};
 use voicen_lib::dictation::{start_dictation, DictationPorts};
@@ -239,8 +251,6 @@ const PP_PROMPT: &str = "PROMPT-CANARY-T074 fix punctuation";
 /// The mock's reply: non-ASCII, and a canary the log must never contain.
 const REPLY: &str = "Voicen e2e REPLY-CANARY-74c, проверено.";
 const REPLY_CANARY: &str = "REPLY-CANARY-74c";
-/// The refusal budget of decision #56 (`voicen-core` tests/common `REFUSAL_BUDGET`).
-const REFUSAL_BUDGET: Duration = Duration::from_secs(5);
 
 /// One request the mock chat server read.
 #[derive(Debug, Clone)]
@@ -253,35 +263,28 @@ struct ChatRequest {
 
 /// A loopback OpenAI-compatible chat endpoint over raw TCP: every connection is read
 /// (head plus `Content-Length` body), recorded and answered `200` with
-/// `{"choices":[{"message":{"role":"assistant","content":REPLY}}]}`.
+/// `{"choices":[{"message":{"role":"assistant","content":REPLY}}]}`. Runs on the shared
+/// [`loopback_support::LoopbackServer`], so it stops when dropped (T-175).
 struct ChatMock {
-    addr: SocketAddr,
+    server: loopback_support::LoopbackServer,
     requests: Arc<Mutex<Vec<ChatRequest>>>,
 }
 
 impl ChatMock {
     fn start() -> ChatMock {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind 127.0.0.1:0");
-        let addr = listener.local_addr().expect("local addr");
         let requests = Arc::new(Mutex::new(Vec::new()));
         let seen = Arc::clone(&requests);
-        thread::spawn(move || {
-            for stream in listener.incoming() {
-                let Ok(stream) = stream else { continue };
-                let seen = Arc::clone(&seen);
-                thread::spawn(move || {
-                    if let Ok(request) = answer_chat(stream) {
-                        lock(&seen).push(request);
-                    }
-                });
+        let server = loopback_support::LoopbackServer::start(move |stream| {
+            if let Ok(request) = answer_chat(stream) {
+                lock(&seen).push(request);
             }
         });
-        ChatMock { addr, requests }
+        ChatMock { server, requests }
     }
 
     /// The base URL the settings store (`http://127.0.0.1:<port>/v1`).
     fn base_url(&self) -> String {
-        format!("http://{}/v1", self.addr)
+        format!("http://{}/v1", self.server.addr())
     }
 
     fn requests(&self) -> Vec<ChatRequest> {
@@ -350,16 +353,14 @@ fn answer_chat(mut s: TcpStream) -> io::Result<ChatRequest> {
     })
 }
 
-/// `127.0.0.1:1`, refused within `REFUSAL_BUDGET / 2` (decision #53, #56), probed at each
-/// call by `timing_support::refused_loopback` (the module that reads the clock, T-201).
-fn refused_loopback() -> SocketAddr {
-    timing_support::refused_loopback(REFUSAL_BUDGET)
-}
-
-/// Saves post-processing on, with `base_url`, the test model and prompt, connect 5 s
-/// and post-processing 10 s, and stores [`PP_KEY`] through the save (the settings
-/// service's own credential store, the one `start_dictation` gets).
-fn enable_post_processing(rig: &AppRig, base_url: &str) {
+/// Saves post-processing on, with `base_url`, the test model and prompt, the connect and
+/// post-processing seconds of `timeouts` (a case's deadlines, e.g. `OsAnswer::refused()`'s:
+/// connect 60 s, post-processing 120 s, inside decision #99's maxima; or
+/// `common::os_answer::in_time()` for a leg that expects an answer), and stores [`PP_KEY`]
+/// through the save (the settings service's own credential store, the one `start_dictation`
+/// gets).
+fn enable_post_processing(rig: &AppRig, base_url: &str, timeouts: &Timeouts) {
+    let secs = |d: Duration| u32::try_from(d.as_secs()).expect("a case deadline in u32 s");
     let mut s = (*rig.service.snapshot()).clone();
     s.post_processing = PostProcessingSettings {
         enabled: true,
@@ -367,8 +368,8 @@ fn enable_post_processing(rig: &AppRig, base_url: &str) {
         model: PP_MODEL.to_string(),
         prompt: PP_PROMPT.to_string(),
     };
-    s.timeouts.connect_s = 5;
-    s.timeouts.post_processing_s = 10;
+    s.timeouts.connect_s = secs(timeouts.connect);
+    s.timeouts.post_processing_s = secs(timeouts.post_processing);
     match rig.service.save(SaveRequest {
         settings: s,
         keys: KeyEdits {
@@ -470,7 +471,7 @@ fn post_processing_on_through_the_real_wiring_pastes_the_chat_reply() {
     let window = TestWindow::open(Shape::TopLevel);
     window.front();
     let rig = AppRig::new(EngineKind::Api);
-    enable_post_processing(&rig, &mock.base_url());
+    enable_post_processing(&rig, &mock.base_url(), &common::os_answer::in_time());
     let engine = TextEngine::new(TRANSCRIPT);
     let indicator = Arc::new(FakeIndicator::new());
     let _dictation = dictate_once(&rig, &engine, &indicator);
@@ -527,12 +528,130 @@ fn post_processing_on_through_the_real_wiring_pastes_the_chat_reply() {
 }
 
 #[test]
+fn loopback_server_stops_on_drop() {
+    // T-175 (T-074 r1 Low): the accept thread of the shared loopback server ends when its
+    // owner drops it (ChatMock and call_chain's Mock both run on it). Observed through the
+    // accept thread's own exit flag, a clone taken before the drop. Deliberately NOT "the
+    // port is refused afterwards": a released port may be taken by another process (F-004,
+    // class test-port-race). Bite: a loop with no stop, a Drop that does not wake the blocked
+    // accept, a flag set before the thread has returned its listener.
+    let server = loopback_support::LoopbackServer::start(|_stream| {});
+    let exited = server.exit_flag();
+    assert!(
+        !exited.load(Ordering::SeqCst),
+        "premise: the accept thread is running before the drop"
+    );
+    // `Drop` joins the accept thread, so a Drop that loses the stop flag (the wake-up connect is
+    // accepted, the loop does not break) or the wake-up (no accept returns) blocks for good.
+    // The drop runs on its own thread under the hang bound, so that is a named red, not a hung
+    // test. The thread of a hung drop is left behind (`within_hang`).
+    assert!(
+        timing_support::within_hang(move || drop(server)).is_some(),
+        "dropping the loopback server did not return within {HANG:?}: its Drop joins the \
+         accept thread, which was never told to stop (the stop flag, or the wake-up connect)"
+    );
+    assert!(
+        timing_support::eventually(|| exited.load(Ordering::SeqCst)),
+        "the accept thread was still running {HANG:?} after its server was dropped"
+    );
+}
+
+/// Set by the parent tests below; the `child_report_*` tests do nothing without it, so a plain
+/// run of this binary only checks that they pass.
+const REPORT_CHILD_ENV: &str = "VOICEN_T175_REPORT_CHILD";
+const REPORT_MARK: &str = "T175-REPORT-LINE-MARK";
+/// The exit code of the watchdog-shape child; the parent's positive control that the child ran
+/// its exit path and not something else.
+const REPORT_EXIT: i32 = 7;
+
+/// Runs the named `child_report_*` test of this binary as its own process, under libtest's
+/// default capture (no `--nocapture`); returns its status and stderr.
+fn report_child(mode: &str, test: &str) -> (std::process::ExitStatus, String, String) {
+    let exe = std::env::current_exe().expect("this test binary's path");
+    let out = std::process::Command::new(exe)
+        .args([test, "--exact", "--test-threads=1"])
+        .env(REPORT_CHILD_ENV, mode)
+        .output()
+        .expect("run the child test process");
+    (
+        out.status,
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+    )
+}
+
+#[test]
+fn child_report_writes_one_line() {
+    if std::env::var(REPORT_CHILD_ENV).as_deref() == Ok("line") {
+        timing_support::report(REPORT_MARK);
+    }
+}
+
+#[test]
+fn child_report_from_a_thread_then_exits() {
+    if std::env::var(REPORT_CHILD_ENV).as_deref() == Ok("exit") {
+        let _keep_alive = {
+            let (tx, rx) = std::sync::mpsc::channel::<()>();
+            thread::spawn(move || {
+                // The watchdog shape: a spawned thread writes its message, then ends the process.
+                timing_support::report(REPORT_MARK);
+                std::process::exit(REPORT_EXIT);
+            });
+            // The test thread waits for the watchdog thread to end the process.
+            let _ = rx.recv_timeout(HANG);
+            tx
+        };
+    }
+}
+
+#[test]
+fn a_report_line_reaches_the_real_stderr_under_libtest_capture() {
+    // T-175 (T-097 r2#3): a record line written with a print macro is captured by libtest for
+    // a passing test, so the job log never carried it. `timing_support::report` writes to
+    // `std::io::stderr()` raw. Checked in a child process: inside this process the captured and
+    // the real stderr look the same to the test. Bite: the writer using `eprintln!` / `println!`,
+    // the line dropped, no newline.
+    let (status, stderr, stdout) = report_child("line", "child_report_writes_one_line");
+    assert!(
+        status.success(),
+        "the child failed ({status:?}): {stderr:?} {stdout:?}"
+    );
+    assert!(
+        stdout.contains("1 passed"),
+        "the child did not run exactly its test: {stdout}"
+    );
+    assert!(
+        stderr.lines().any(|l| l.contains(REPORT_MARK)),
+        "the report line is not on the child's stderr: {stderr:?}"
+    );
+}
+
+#[test]
+fn a_report_line_from_a_thread_survives_process_exit() {
+    // T-175 (the watchdog shape, proved 2026-11-18): a spawned thread inherits the test's
+    // capture, so a print macro there is dropped when the thread then calls `process::exit`.
+    // The three-plus watchdogs (`lifecycle`, `overlay`, `watch_for_hang`, ...) report a hang
+    // this way. Bite: `eprintln!`, a buffered writer not flushed before the exit.
+    let (status, stderr, _stdout) = report_child("exit", "child_report_from_a_thread_then_exits");
+    assert_eq!(
+        status.code(),
+        Some(REPORT_EXIT),
+        "positive control: the child ended through its thread's exit ({stderr:?})"
+    );
+    assert!(
+        stderr.lines().any(|l| l.contains(REPORT_MARK)),
+        "the thread's report line is lost at process exit; the child's stderr: {stderr:?}"
+    );
+}
+
+#[test]
 fn post_processing_server_refusing_still_pastes_the_raw_transcript_with_tray_error() {
     // T-074 Acceptance line 2 (failure branch): post-processing enabled with base URL =
-    // a loopback port that refuses (`127.0.0.1:1`) ends with
+    // core's refused case (`common::os_answer::OsAnswer::refused()`, with its own connect and
+    // post-processing deadlines, T-175 I1) ends with
     // - the raw transcript, byte for byte, in the test window and on the clipboard;
     // - the skip reason reaching the session: overlay Recording, Processing, then
-    //   `notice.post_processing_skipped.unreachable` with host=127.0.0.1:1, and tray
+    //   `notice.post_processing_skipped.unreachable` with host = the case's host, and tray
     //   Error (decision #91(3));
     // - one `dictation … outcome=delivered result=pasted` line (a skip is a delivery)
     //   and none of the transcript, prompt or key in the log.
@@ -541,11 +660,11 @@ fn post_processing_server_refusing_still_pastes_the_raw_transcript_with_tray_err
     // message or no host).
     let _serial = serial();
     assert_hotkey_free();
-    let refused = refused_loopback();
+    let case = common::os_answer::OsAnswer::refused();
     let window = TestWindow::open(Shape::TopLevel);
     window.front();
     let rig = AppRig::new(EngineKind::Api);
-    enable_post_processing(&rig, &format!("http://{refused}/v1"));
+    enable_post_processing(&rig, &format!("http://{}/v1", case.host), &case.timeouts);
     let engine = TextEngine::new(TRANSCRIPT);
     let indicator = Arc::new(FakeIndicator::new());
     let _dictation = dictate_once(&rig, &engine, &indicator);
@@ -564,7 +683,7 @@ fn post_processing_server_refusing_still_pastes_the_raw_transcript_with_tray_err
     );
     let skipped = Shown::Message(
         "notice.post_processing_skipped.unreachable",
-        vec![("host", refused.to_string())],
+        vec![("host", case.host.clone())],
     );
     assert!(
         eventually(|| shown(&indicator.overlays()).contains(&skipped)),

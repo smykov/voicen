@@ -147,10 +147,10 @@ fn watchdog(test: &'static str) -> Watchdog {
     let (tx, rx) = mpsc::channel::<()>();
     thread::spawn(move || {
         if let Err(RecvTimeoutError::Timeout) = rx.recv_timeout(WATCHDOG) {
-            eprintln!(
+            timing_support::report(&format!(
                 "call_indicator watchdog: `{test}`: the event loop did not return within \
                  {WATCHDOG:?}; ending the test exe"
-            );
+            ));
             std::process::exit(3);
         }
     });
@@ -727,7 +727,9 @@ impl Shown {
 /// then the window read once.
 fn shown(handle: &AppHandle<Wry>) -> Shown {
     let (receipt, took) = measure(|| call_indicator::settled(handle, RECEIPT_HANG));
-    eprintln!("call indicator: receipt {receipt:?} after {took:?}");
+    timing_support::report(&format!(
+        "call indicator: receipt {receipt:?} after {took:?}"
+    ));
     let hwnd = receipt.and_then(|_| indicator_hwnd(handle));
     Shown {
         receipt,
@@ -996,11 +998,11 @@ fn s4_driver(name: &'static str, page: impl Assets<Wry> + 'static) {
          {kept}); in front during the run: {:?}",
         fg.away
     );
-    eprintln!(
+    timing_support::report(&format!(
         "S4 evidence: variant {} lost the foreground during the click: {}",
         if VARIANT_N { "N" } else { "F" },
         !fg.away.is_empty() || !fg.focus_losses.is_empty()
-    );
+    ));
     if VARIANT_N {
         assert_eq!(
             fg.away,
@@ -1178,13 +1180,13 @@ fn s7_the_foreground_contract_holds_in_one_variant_or_the_owner_decides() {
         )
     });
     let (after_click, moved, after_drag, gone, end, fg, before, after, dx, dy) = report;
-    eprintln!(
+    timing_support::report(&format!(
         "S7 evidence: variant {}, away {:?}, focus losses {:?}, samples {}",
         if VARIANT_N { "N" } else { "F" },
         fg.away,
         fg.focus_losses,
         fg.samples
-    );
+    ));
     assert!(
         after_click && after_drag && end && moved && gone,
         "neither variant keeps the foreground: foreground after click {after_click}, after drag \

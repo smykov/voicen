@@ -4,8 +4,9 @@
 //! for every target by `src-tauri/Cargo.toml` `[lints]`, run by `make check-shell-windows`) refuses
 //! `Instant::now`, `Instant::elapsed` and `SystemTime::elapsed` under any spelling in every test
 //! crate; this module's allow below is the one shell-owned exemption. The other one is core's
-//! `crates/voicen-core/tests/common`, which `settings_ipc.rs` includes via `#[path]`: it carries
-//! its own allow and a budgeted `eventually` (a review-only residual, not refused by the ban).
+//! `crates/voicen-core/tests/common`, which `settings_ipc.rs` and `dictation_e2e.rs` include via
+//! `#[path]`: it carries its own allow and a budgeted `eventually` (a review-only residual, not
+//! refused by the ban).
 //!
 //! What a test can express through it, and what it cannot:
 //! - a measured time ([`measure`], [`between`]) is an opaque [`Took`]: only [`at_least`] (a
@@ -24,12 +25,12 @@
 //! - instants that are not measurements: [`now`] (a timestamp a product API takes, a before /
 //!   after bracket), and [`deadline`] / [`left`] / [`passed`] for child-process kill bounds,
 //!   reader grace, hold timers and drain windows (the residual: such a loop is reviewed, T1).
-//! - [`refused_loopback`], the shell copy of the refused-address premise probe (decision #56).
+//! - a record line ([`report`]): written raw to the real stderr, so libtest's capture does not
+//!   drop it (T-175).
 #![allow(dead_code)]
 #![allow(clippy::disallowed_methods)]
 
-use std::io;
-use std::net::{SocketAddr, TcpStream};
+use std::io::Write;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -173,11 +174,11 @@ pub fn watch_for_hang(what: &str) -> HangWatch {
     let what = what.to_string();
     thread::spawn(move || {
         if let Err(RecvTimeoutError::Timeout) = ended.recv_timeout(HANG * 2) {
-            eprintln!(
+            report(&format!(
                 "HANG: test `{test}` was still running {:?} after {what} started; a wait or a \
                  drop never returned (T-128 hang guard)",
                 HANG * 2
-            );
+            ));
             std::process::exit(101);
         }
     });
@@ -216,31 +217,14 @@ pub fn holds_for_pumping(
     cond()
 }
 
-/// `127.0.0.1:1`, the one loopback address a test may expect to be refused (decision #53:
-/// below every ephemeral range, never bound and released). Probed at each call: a plain connect
-/// must be refused within `budget / 2` (decision #56, a premise of the test, not a verdict on the
-/// product), else this panics (a runner problem, not a product failure).
-#[track_caller]
-pub fn refused_loopback(budget: Duration) -> SocketAddr {
-    let addr = SocketAddr::from(([127, 0, 0, 1], 1));
-    let started = Instant::now();
-    let probe = TcpStream::connect_timeout(&addr, budget);
-    let took = started.elapsed();
-    match probe {
-        Ok(_) => panic!("premise: something listens on {addr} (decision #53)"),
-        Err(e) if e.kind() == io::ErrorKind::ConnectionRefused => {
-            assert!(
-                took < budget / 2,
-                "premise: the connect to {addr} was refused only after {took:?} (decision #56)"
-            );
-            addr
-        }
-        Err(e) => panic!(
-            "premise: the connect to {addr} was not refused within {budget:?} ({:?} after \
-             {took:?})",
-            e.kind()
-        ),
-    }
+/// The record writer (T-175): writes `line` and a newline to the real stderr in one
+/// `std::io::stderr().write_all`, as core's `common::timing::skip` does. Never a print macro:
+/// libtest captures those for a passing test, and a spawned thread's captured line is lost at
+/// `process::exit`. Stderr is unbuffered, so the line is out before a following exit. A failed
+/// write is ignored (a record line is not a verdict). Pinned by `dictation_e2e.rs`'s
+/// `a_report_line_*` tests.
+pub fn report(line: &str) {
+    let _ = std::io::stderr().write_all(format!("{line}\n").as_bytes());
 }
 
 /// Compiles only while `T` does NOT implement the trait in the second impl: with it,

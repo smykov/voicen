@@ -9,7 +9,7 @@ Also: `scripts/ci/core-test-os-answer.sh` (the I1 tripwire, run by `make check-c
 
 **Users of `tests/common`:**
 - Every voicen-core test binary that declares `mod common;`. Among them: `api_pipeline`, `openai_client`, `diag_pipeline`, `local_server`, `local_download`, `local_download_refused`, `post_process_chat`, `post_process_timeout`, `connection_test`, `dictation_session`, `fakes`, `local_models_service`, `diag_blocked_press`, `diag_observer`, `common_helpers`.
-- The shell test `src-tauri/tests/settings_ipc.rs`. It includes `common/mod.rs` and `common/refused_addr_tests.rs` through `#[path]`, so a change to `common` must keep it building. It is type-checked by `check-shell-windows` and runs only in the Windows job.
+- The shell tests `src-tauri/tests/settings_ipc.rs` and `dictation_e2e.rs` (T-175). Each includes `common/mod.rs` and `common/refused_addr_tests.rs` through `#[path]`, so a change to `common` must keep them building. They are type-checked by `check-shell-windows` and run only in the Windows job.
 
 **Tests that pin it:**
 - `common_helpers` (`common/timing_tests.rs`, `common/os_answer_tests.rs`) and `common_in_time` (`common/in_time_tests.rs`: the `in_time()` destructure; `common/timing_seam_tests.rs`: `M`, `skip` in a child process under libtest capture, `with_premise`).
@@ -19,7 +19,7 @@ Also: `scripts/ci/core-test-os-answer.sh` (the I1 tripwire, run by `make check-c
   - the port is refused by a probe within `OS_ANSWER_BUDGET`;
   - every deadline of the case, destructured exhaustively.
 - `timing_tests::a_measured_time_cannot_be_compared_or_read_back_so_no_ceiling_compiles`: a compile-time check that `Took` has no comparison, `==`, deref or conversion back to a `Duration`.
-- The I1 tripwire self-test `core-test-os-answer.test.sh`: 24 cases, including the real tests dir. The I2 ban's canary `ban-canary.sh` (probes k01-k13 and k15-k17, k19, k20 in `tests/ban_canary.rs`, feature `ban-canary-tests`; k14 and k18 in `src/ban_canary.rs`, feature `ban-canary-lib`).
+- The I1 tripwire self-test `core-test-os-answer.test.sh`: 25 cases, including the two real tests dirs (core, shell). The I2 ban's canary `ban-canary.sh` (probes k01-k13 and k15-k17, k19, k20 in `tests/ban_canary.rs`, feature `ban-canary-tests`; k14 and k18 in `src/ban_canary.rs`, feature `ban-canary-lib`).
 
 **Tasks:** T-111 (in-time legs, both actors); T-016; T-047 (F-004); T-048 (F-005); T-078 (F-013; deferred and absorbed by T-080); T-080 (rca, class `os-answer-deadline-race`); T-089 (I2 moved to a compiler ban, I1 a raw-token tripwire); T-107 (F-021; deferred and absorbed by T-110); T-110 (rca, class `os-answer-deadline-race`: no wall-clock ceiling in any core test).
 **Classes** in `docs/failures.md`: `test-port-race` and `os-answer-deadline-race`.
@@ -75,7 +75,7 @@ This is one rule for every kind of uncontrolled clock: the OS refusal time, the 
 **What breaks if you violate it:** a test is green on an idle host and red on a loaded one, on windows-latest, or behind a slow resolver. The verdict then reports the host, not the product: a correct deadline red once in about 57 Windows runs (F-021).
 
 **Where it is enforced:**
-- T3, I1 (T-089, `decides_on: token`): `make check-core-test-os-answer` runs `scripts/ci/core-test-os-answer.sh` over every `*.rs` under `crates/voicen-core/tests` outside the top-level `common/`.
+- T3, I1 (T-089, `decides_on: token`): `make check-core-test-os-answer` runs `scripts/ci/core-test-os-answer.sh` over every `*.rs` under `crates/voicen-core/tests` outside the top-level `common/`. Since T-175 (option B) its self-test also runs the guard over every `*.rs` under `src-tauri/tests` (the guard exempts `<dir>/common/`; `src-tauri/tests` has none, and the self-test's premise case fails if one appears, T-175 review r1 #3), so a shell test naming an OS-answer target fails `make check`; the shell takes the refused case from `OsAnswer::refused()`. Not caught, as for core: the array form, an address built at run time, `src-tauri/src` unit tests.
   - It refuses a line holding an OS-answer token, in any case, comments included (no `//` skip): `.invalid` not followed by a letter, digit or `_`; `127.0.0.1:1` not followed by a digit; `192.0.2.1` not followed by a digit.
   - It reads no Rust syntax (F-003, P-020). It does not catch:
     - the array form `SocketAddr::from(([127, 0, 0, 1], 1))`, `Ipv4Addr::LOCALHOST`, `127.1`, `:01`;

@@ -975,8 +975,9 @@ fn another_window_label_gets_no_permission() {
 
 #[test]
 fn settings_window_gets_nothing_beyond_the_least_privilege_set() {
-    // Decision #45: least privilege, exactly core:event:allow-listen,
-    // core:event:allow-unlisten and core:window:allow-destroy, not core:default.
+    // Decision #45: least privilege in plugin permissions, exactly
+    // core:event:allow-listen, core:event:allow-unlisten and core:window:allow-destroy,
+    // not core:default (the window's app command grants are pinned by app_acl.rs).
     // Bite: `core:default` (or core:window:default / core:app:default) kept in the
     // capability.
     let dir = TempDir::new();

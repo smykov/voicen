@@ -137,10 +137,10 @@ fn watchdog(test: &'static str) -> Watchdog {
     let (tx, rx) = mpsc::channel::<()>();
     thread::spawn(move || {
         if let Err(RecvTimeoutError::Timeout) = rx.recv_timeout(WATCHDOG) {
-            eprintln!(
+            timing_support::report(&format!(
                 "overlay watchdog: `{test}`: the event loop did not return within \
                  {WATCHDOG:?}; ending the test exe"
-            );
+            ));
             std::process::exit(3);
         }
     });
@@ -332,7 +332,7 @@ impl Shown {
 /// then.
 fn shown(handle: &AppHandle<Wry>) -> Shown {
     let (receipt, took) = measure(|| voicen_lib::overlay::settled(handle, OVERLAY_HANG));
-    eprintln!("overlay: receipt {receipt:?} after {took:?}");
+    timing_support::report(&format!("overlay: receipt {receipt:?} after {took:?}"));
     Shown {
         receipt,
         visible: receipt.is_some() && overlay_hwnd(handle).is_some_and(is_visible),

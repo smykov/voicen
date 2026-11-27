@@ -5,7 +5,8 @@
 //! Not a module of `tests/common`: each binary that takes a refused case
 //! (`tests/openai_client.rs`, `tests/api_pipeline.rs`, `tests/diag_pipeline.rs`,
 //! `tests/local_server.rs`, `tests/post_process_chat.rs`, `tests/connection_test.rs`,
-//! `src-tauri/tests/settings_ipc.rs`) includes this file with `#[path]`, so the case
+//! `src-tauri/tests/settings_ipc.rs`, `src-tauri/tests/dictation_e2e.rs`) includes this
+//! file with `#[path]`, so the case
 //! is checked in the process that relies on it, and a binary that does not use it
 //! runs none of these connect probes (each probe takes an ephemeral source port for
 //! an instant; T-047 review 1 #3). Keep it out of `tests/local_download_refused.rs`,

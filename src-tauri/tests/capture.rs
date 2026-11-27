@@ -35,8 +35,11 @@ use voicen_lib::win::capture::{capture_error, open_bounded};
 /// OS-like text planted as cpal's message: it must never reach a `CaptureError`.
 const CANARY: &str = "PLANTED-OS-TEXT 0x80070005 Zugriff verweigert";
 
-/// Every cpal 0.18.2 `ErrorKind` (error.rs:7-91), by a match that lists each one, so a
-/// kind added by a cpal update shows up here.
+/// Every cpal 0.18.2 `ErrorKind` (error.rs:7-91), listed by hand. It cannot detect a kind
+/// a cpal update adds: `ErrorKind` is `#[non_exhaustive]`, so the match below needs a
+/// wildcard arm and checks only its own list (docs/failures.md class
+/// `upstream-callback-contract`, T1: a cpal version change in review re-reads every
+/// `emit_error` / `try_emit_error` site).
 fn all_kinds() -> Vec<ErrorKind> {
     let all = vec![
         ErrorKind::DeviceBusy,
