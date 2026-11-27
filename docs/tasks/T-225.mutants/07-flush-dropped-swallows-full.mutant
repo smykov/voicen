@@ -1,0 +1,12 @@
+guarantee: Acceptance 3 (T-124 r1#3) / I7: a refused send of the pending drop is not swallowed; the drop stays pending and is delivered once the channel has room (swallowed error at the origin: Full treated as delivered)
+file: crates/voicen-core/src/call/capture.rs
+added_by: test-writer
+test: cargo test -p voicen-core -j2 --lib a_pending_drop
+--- old
+            Err(TrySendError::Full(_)) => {
+                self.shared.dropped.fetch_add(v, Ordering::AcqRel);
+                false
+            }
+--- new
+            Err(TrySendError::Full(_)) => true,
+--- end

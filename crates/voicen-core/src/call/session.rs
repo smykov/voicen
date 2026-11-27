@@ -1863,19 +1863,25 @@ impl Writer {
 
     /// One pass over both channels; `true` when an event was handled.
     fn drain(&mut self) -> bool {
+        let mic = self.drain_track(Track::Mic);
+        let system = self.drain_track(Track::System);
+        mic || system
+    }
+
+    /// Handles what one track's channel holds until a read finds it empty; `true` when an
+    /// event was handled.
+    fn drain_track(&mut self, track: Track) -> bool {
         let mut busy = false;
-        for track in [Track::Mic, Track::System] {
-            loop {
-                let rx = match track {
-                    Track::Mic => &self.mic_rx,
-                    Track::System => &self.system_rx,
-                };
-                let Some(event) = rx.try_recv() else {
-                    break;
-                };
-                busy = true;
-                self.handle(track, event);
-            }
+        loop {
+            let rx = match track {
+                Track::Mic => &self.mic_rx,
+                Track::System => &self.system_rx,
+            };
+            let Some(event) = rx.try_recv() else {
+                break;
+            };
+            busy = true;
+            self.handle(track, event);
         }
         busy
     }
@@ -2142,15 +2148,24 @@ impl Writer {
     /// [`Timeline::advance_to`]); when neither delivers, both follow the source's clock. A
     /// reopened stream that sent nothing for [`SETTLE`] has its gap measured where the
     /// track stands.
+    ///
+    /// Each track's channel is drained just before that track is decided: `last_event`
+    /// says when the writer last took an event, not when capture delivered one, so only an
+    /// empty read made after the writer's last handle shows the track delivered nothing
+    /// (I9). A track that had events queued is not stalled this round, and a lost one is
+    /// not filled past blocks it just received.
     fn advance(&mut self) {
         if self.rec.is_none() {
             return;
         }
-        let now = self.mono.now();
-        let stalled = |seen: &Seen| now.saturating_duration_since(seen.last_event) >= STALL;
-        let both = stalled(&self.seen.mic) && stalled(&self.seen.system);
-        let clock = both.then(|| self.source.now());
         for track in [Track::Mic, Track::System] {
+            if self.drain_track(track) || self.rec.is_none() {
+                continue;
+            }
+            let now = self.mono.now();
+            let stalled = |seen: &Seen| now.saturating_duration_since(seen.last_event) >= STALL;
+            let both = stalled(&self.seen.mic) && stalled(&self.seen.system);
+            let clock = both.then(|| self.source.now());
             let lost = self
                 .rec
                 .as_ref()

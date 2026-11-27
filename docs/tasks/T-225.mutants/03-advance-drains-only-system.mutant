@@ -1,0 +1,9 @@
+guarantee: Acceptance 2 + failure branch: the first-drained track (Mic) is drained before it is decided; draining only System leaves the Mic zero-filled behind a slow System handle
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+test: cargo test -p voicen-core -j2 --test call_session a_slow_
+--- old
+            if self.drain_track(track) || self.rec.is_none() {
+--- new
+            if (track == Track::System && self.drain_track(track)) || self.rec.is_none() {
+--- end

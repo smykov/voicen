@@ -1,0 +1,9 @@
+guarantee: -
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+test: cargo test -p voicen-core -j2 --test call_session a_slow_
+--- old
+            if self.drain_track(track) || self.rec.is_none() {
+--- new
+            if (track == Track::Mic && self.drain_track(track)) || self.rec.is_none() {
+--- end
