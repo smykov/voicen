@@ -140,7 +140,8 @@ The texts live in the one catalog at the repository root, `i18n/en.json` and `i1
 | `calls.root_unavailable` | Folder not available: {root} |
 | `calls.search` / `calls.no_matches` | Search / No matches |
 | `calls.transcribe` / `calls.transcribe_again` / `calls.copy` / `calls.export_md` / `calls.export_json` / `calls.open_folder` / `calls.delete` / `calls.delete_confirm` | … |
-| `calls.error.in_use` / `calls.error.empty_name` / `calls.error.recording` / `calls.error.io` | could not delete: {file} is in use / … |
+| `calls.error.in_use` / `calls.error.empty_name` / `calls.error.recording` | could not delete: {file} is in use / … |
+| `calls.error.io` (T-255) | Could not complete the action. |
 | `calls.error.io.missing` (T-143) | Could not complete the action: the file or folder is not available |
 | `calls.error.io.not_a_folder` (T-143) | Could not complete the action: the path is not a folder |
 | `calls.error.io.access_denied` (T-143) | Could not complete the action: access denied |

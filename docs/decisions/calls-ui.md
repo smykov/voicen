@@ -26,7 +26,7 @@ The page renders only what the `calls_*` commands and `settings_get` return, thr
 
 ### D4 — A failed action shows its reason
 
-- `callErrorMessageId(error)`: `ioFailed{reason}` maps to `calls.error.io.<reason>`; an unknown or absent reason maps to `calls.error.io.other`; `notFound` maps to `calls.error.io`. One mapper serves list, detail, copy, export and open-folder failures; one `role=alert` shows the text. A cancelled export (`saved: false`) shows nothing.
+- `callErrorMessageId(error)`: `ioFailed{reason}` maps to `calls.error.io.<reason>`; an unknown or absent reason maps to `calls.error.io.other`; `notFound` maps to `calls.error.io`. The base id `calls.error.io` is the catch-all: `notFound` and any rejection that is not a `CallError`, on every `calls_*` command. Its text is neutral ("Could not complete the action."; RU "Не удалось выполнить действие.") and names no folder, file or command (T-255, decisions #377: it had said "The call folder could not be read or changed."); `notFound` keeps the id, its own text belongs to T-154. One mapper serves list, detail, copy, export and open-folder failures; one `role=alert` shows the text. A cancelled export (`saved: false`) shows nothing.
 - **Alert scoping:** the error is tagged by its source (`list`, `detail`, `other`). A successful list refetch clears only a `list` error, a successful `calls_get` only a `detail` error; an action or a selection clears any.
 - **Where it is enforced:** `view.test.ts` (mapper, ids exist in EN and RU), the failure-branch e2e tests (T-143 mutant record).
 - **Don't:** swallow a rejection at the call, or map every reason to a constant.
