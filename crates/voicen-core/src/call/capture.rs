@@ -1578,6 +1578,24 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_pending_drop_keeps_its_exact_time_over_failed_retries_while_the_channel_stays_full() {
+        // T-225 (T-124 r1#3): 100 frames at 44.1 kHz are 2268 us (not a whole ms). Capacity
+        // 1 and the queue never drained: the first block fills it, the other 11 are
+        // dropped, and each of the last 10 first retries to deliver the pending drop, fails
+        // on a full queue and puts it back. The delivered `Dropped.ms` is the rounded sum
+        // of the raw time, 11 * 2.268 = 24.9 -> 25 ms; re-adding the already rounded ms on
+        // each retry loses 0.268 ms per retry and delivers 22. Bite: `flush_dropped` adding
+        // `ms * 1_000` back instead of the raw packed value.
+        let (sink, mic_rx, _sys) = ChannelSink::new(1);
+        for i in 0..12 {
+            sink.block(Track::Mic, &[0.5; 100], 44_100, 1, ms(i * 3));
+        }
+        let events = drain(&mic_rx);
+        assert_eq!(events.len(), 2, "{events:?}");
+        assert_eq!(events[1], TrackEvent::Dropped { blocks: 11, ms: 25 });
+    }
+
     // ---- levels (AC-7) -------------------------------------------------------------------
 
     #[test]

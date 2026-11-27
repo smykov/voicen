@@ -889,6 +889,11 @@ impl CallSettingsPort for FakePort {
 pub struct FakeSubtitles {
     samples: Mutex<HashMap<Track, usize>>,
     calls: AtomicUsize,
+    /// T-225: the track whose next `audio` call parks the writer (once), a slow handle.
+    park_on: Mutex<Option<Track>>,
+    parked: AtomicUsize,
+    /// `true` while a parked `audio` call must keep waiting.
+    hold: (Mutex<bool>, Condvar),
 }
 
 impl FakeSubtitles {
@@ -896,7 +901,30 @@ impl FakeSubtitles {
         Arc::new(FakeSubtitles {
             samples: Mutex::new(HashMap::new()),
             calls: AtomicUsize::new(0),
+            park_on: Mutex::new(None),
+            parked: AtomicUsize::new(0),
+            hold: (Mutex::new(false), Condvar::new()),
         })
+    }
+
+    /// T-225: the next `audio` call of `track` blocks, once, until `release_park`. The
+    /// writer calls `audio` synchronously inside its handle of a block, so the writer is
+    /// held inside one handle of that track (a slow encoder write, `write_meta`, consumer).
+    pub fn arm_park(&self, track: Track) {
+        *lock(&self.hold.0) = true;
+        self.parked.store(0, Ordering::SeqCst);
+        *lock(&self.park_on) = Some(track);
+    }
+
+    /// T-225: the writer is inside the parked `audio` call.
+    pub fn is_parked(&self) -> bool {
+        self.parked.load(Ordering::SeqCst) > 0
+    }
+
+    /// T-225: lets the parked `audio` call return.
+    pub fn release_park(&self) {
+        *lock(&self.hold.0) = false;
+        self.hold.1.notify_all();
     }
 
     /// Samples received for `track` so far.
@@ -913,6 +941,25 @@ impl FakeSubtitles {
 impl SubtitleConsumer for FakeSubtitles {
     fn audio(&self, track: Track, samples: &[f32]) {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        let park = {
+            let mut armed = lock(&self.park_on);
+            if *armed == Some(track) {
+                armed.take()
+            } else {
+                None
+            }
+        };
+        if park.is_some() {
+            self.parked.fetch_add(1, Ordering::SeqCst);
+            let mut held = lock(&self.hold.0);
+            while *held {
+                held = self
+                    .hold
+                    .1
+                    .wait(held)
+                    .unwrap_or_else(PoisonError::into_inner);
+            }
+        }
         *lock(&self.samples).entry(track).or_default() += samples.len();
     }
 }

@@ -1,0 +1,8 @@
+guarantee: I9 guard: a live track that delivered nothing for 500 ms is still advanced after the drain-before-advance fix (Acceptance 2, counted drops stay allowed)
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+            if !lost && !stalled(self.seen.get(track)) {
+--- new
+            if !lost {
+--- end
