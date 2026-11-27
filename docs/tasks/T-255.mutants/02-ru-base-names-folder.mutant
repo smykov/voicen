@@ -1,0 +1,8 @@
+guarantee: Failure branch: notFound and a non-CallError rejection show the base text, naming no folder (RU, /папк/i)
+file: i18n/ru.json
+added_by: test-writer
+--- old
+  "calls.error.io": "Не удалось выполнить действие.",
+--- new
+  "calls.error.io": "Не удалось выполнить действие с папкой звонка.",
+--- end

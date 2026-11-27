@@ -1,0 +1,1 @@
+pnpm test -- src/lib/calls && pnpm e2e e2e/calls.spec.ts --workers=2 --reporter=line

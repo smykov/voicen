@@ -1,0 +1,11 @@
+guarantee: Failure branch: notFound and a non-CallError rejection show the base text, naming no folder (non-CallError -> base id)
+file: src/lib/calls/view.ts
+added_by: test-writer
+--- old
+  return "calls.error.io";
+}
+--- new
+  if (typeof error !== "object" || error === null) return "calls.error.io.other";
+  return "calls.error.io";
+}
+--- end
