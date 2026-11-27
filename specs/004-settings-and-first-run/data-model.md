@@ -26,6 +26,9 @@ All types live in `crates/voicen-core` (module `settings`, `secrets`, `i18n`) un
 | `timeouts` | `TimeoutSettings` `{connect_s, api_transcription_s, local_server_s, post_processing_s, builtin_local_s}`, whole seconds, u32 | 5 / 30 / 60 / 15 / 120 (req FR-24) | each in its range from `timeouts::TimeoutRole::bounds` (decision #99: connect 1–60, API 5–600, local server 5–1800, post-processing 5–300, built-in 10–1800), checked for every engine; outside → `timeout.range` | `timeouts.connect`, `timeouts.api_transcription`, `timeouts.local_server`, `timeouts.post_processing`, `timeouts.builtin_local` | FR-13, FR-24 |
 | `start_with_windows` | bool | `false` | applied in save (R-3); failure refuses | `general.start_with_windows` | FR-19 |
 | `ui_language` | `en` \| `ru` | `resolve_ui_language(os_tag)` | — | `general.ui_language` | FR-15, FR-21 |
+| `calls` | `CallSettings` (call mode, spec 007) | see spec 007 | see spec 007 | `calls.*` | spec 007 |
+
+The `calls` section is stated only by spec 007 [data-model.md › CallSettings](../007-call-mode-record/data-model.md#callsettings-the-calls-section-of-settingsjson) (T-120).
 
 Rules:
 - `Settings` has **no key field**; it derives `Serialize`/`Deserialize`; the container has `#[serde(default)]` built from `defaults()` (not the field type's `Default`), so a missing field takes its value from `defaults()` and older files load (R-2).
@@ -44,7 +47,7 @@ Rules:
 
 ## SettingsView (what a window receives)
 
-`{ settings: Settings, keys: KeyPresence, first_run: bool, reset_notice: bool, unavailable: bool, provider_host: string | null }`. Sent by `settings_get` and the `settings://changed` event. Never contains a key. `unavailable` is true only after an `Unavailable` load (then every key is reported absent and every save is refused with `SettingsUnavailable`); the window shows `notice.settings_unavailable` when it opens (decision #38 Q4, T-004).
+`{ settings: Settings, keys: KeyPresence, first_run: bool, reset_notice: bool, unavailable: bool, … }`, where `…` is the call-mode fields of spec 007; the JSON form and the pointer to them are in [contracts/ipc.md › Wire form](contracts/ipc.md#wire-form-serde-impls-in-voicen_core-pinned-by-core-tests-on-the-linux-gate). Sent by `settings_get` and the `settings://changed` event. Never contains a key. `unavailable` is true only after an `Unavailable` load (then every key is reported absent and every save is refused with `SettingsUnavailable`); the window shows `notice.settings_unavailable` when it opens (decision #38 Q4, T-004).
 
 ## SaveRequest / SaveOutcome
 
@@ -61,20 +64,24 @@ Rules:
 ```text
 Validate ──errors──▶ Refused
    │ok
-HotkeyPrepared? ──fail──▶ Refused(hotkey.unavailable)
+HotkeyPrepared? (only when hotkey changed) ──fail──▶ Refused(recording.hotkey: hotkey.unavailable)
    │
-AutostartApplied? (only when start_with_windows changed) ──fail──▶ undo hotkey ▶ Refused(autostart.failed)
+CallHotkeyPrepared? (4b, only when calls.hotkey changed) ──fail──▶ abort hotkey ▶ Refused(calls.hotkey: hotkey.unavailable)
    │
-KeysApplied ──fail──▶ undo keys so far, autostart, hotkey ▶ Refused(key.store_failed)
+AutostartApplied? (only when start_with_windows changed) ──fail──▶ abort hotkeys ▶ Refused(autostart.failed)
    │
-FileWritten ──fail──▶ undo keys, autostart, hotkey ▶ Refused(form: WriteFailed)
+KeysApplied ──fail──▶ undo keys so far, autostart; abort hotkeys ▶ Refused(key.store_failed)
    │
-Committed (old hotkey released, snapshot swapped, subscribers notified) ▶ Saved(warnings)
+FileWritten ──fail──▶ undo keys, autostart; abort hotkeys ▶ Refused(form: WriteFailed)
+   │
+Committed (each prepared hotkey committed, old one of its slot released; snapshot swapped, subscribers notified) ▶ Saved(warnings)
 ```
 
-As built by T-032 (`settings::service`): before `Validate`, a service that loaded as `Unavailable` returns `Refused(form: SettingsUnavailable)` without calling any dependency; then the draft is normalized and the three key slots are read (old values for the undo, presence for `validate`; a read error → `Refused(key.store_failed)` on that slot, nothing written). `validate` sees the raw key edits. Keys are applied in `KeySlot::all()` order: an empty-after-trim `Replace` is `Untouched` (#30), a non-empty one is stored trimmed (decisions #33(a)). Undo walks the completed key steps in reverse (old key → write, no old key → delete) and goes on after an undo error; any failed undo makes `form_error = PartiallyRestored`. One lock serializes saves, publish included. The hotkey step is a no-op until T-010.
+As built by T-032 (`settings::service`): before `Validate`, a service that loaded as `Unavailable` returns `Refused(form: SettingsUnavailable)` without calling any dependency; then the draft is normalized and the three key slots are read (old values for the undo, presence for `validate`; a read error → `Refused(key.store_failed)` on that slot, nothing written). `validate` sees the raw key edits. Keys are applied in `KeySlot::all()` order: an empty-after-trim `Replace` is `Untouched` (#30), a non-empty one is stored trimmed (decisions #33(a)). Undo walks the completed key steps in reverse (old key → write, no old key → delete) and goes on after an undo error; any failed undo makes `form_error = PartiallyRestored`. One lock serializes saves, publish included. (The call storage root step of T-120, between `Validate` and the hotkey steps, is in [contracts/core-traits.md › `SettingsService`](contracts/core-traits.md#settingsservice-req-fr-13-fr-21), `save` order.)
 
-Autostart step (T-014): after the hotkey placeholder and before the keys, and only when the normalized draft's `start_with_windows` differs from the snapshot in force (read under the save lock); `Autostart::set(new)`. A failure returns `Refused { [general.start_with_windows: autostart.failed], form_error: None }` with no key, file or snapshot changed. The undo runs after the key undo (keys in reverse slot order, then `set(old)`); a failed autostart undo puts `general.start_with_windows` first in `PartiallyRestored.not_restored`. While `Unavailable` no `Autostart` call is made.
+Hotkey steps (T-055, T-129; [docs/decisions/settings.md › A saved hotkey is registered in two steps, and only a changed one](../../docs/decisions/settings.md#a-saved-hotkey-is-registered-in-two-steps-and-only-a-changed-one)): (4) only when `hotkey` differs from the snapshot in force, the registrar prepares it with the draft `mode`; an unparsable or taken hotkey → `Refused { [recording.hotkey: hotkey.unavailable], form_error: None }` with nothing touched. (4b) only when `calls.hotkey` differs from the snapshot in force, the same two steps on the registrar's call slot; a failure → `Refused { [calls.hotkey: hotkey.unavailable], form_error: None }` and the registration prepared in (4) is aborted. Every later refusal aborts both prepared registrations; both are committed after the file is written and before the snapshot swap. An unchanged hotkey is never re-registered.
+
+Autostart step (T-014): after the hotkey steps and before the keys, and only when the normalized draft's `start_with_windows` differs from the snapshot in force (read under the save lock); `Autostart::set(new)`. A failure returns `Refused { [general.start_with_windows: autostart.failed], form_error: None }` with no key, file or snapshot changed. The undo runs after the key undo (keys in reverse slot order, then `set(old)`); a failed autostart undo puts `general.start_with_windows` first in `PartiallyRestored.not_restored`. While `Unavailable` no `Autostart` call is made.
 
 ## LoadOutcome (startup)
 
@@ -97,7 +104,7 @@ Autostart step (T-014): after the hotkey placeholder and before the keys, and on
 
 - `Hotkey { ctrl, alt, shift, win, key: HotkeyKey }`; canonical string form; `HotkeyKey` closed set of 82 keys (research R-6): `A`–`Z`, `0`–`9`, `F1`–`F24`, `Space`, `Insert`, `Delete`, `Home`, `End`, `PageUp`, `PageDown`, arrows `Up`/`Down`/`Left`/`Right`, `Pause`, numpad `Num0`–`Num9`. No numpad operator keys and no `Esc` (decisions #26).
 - Parsing is strict: only the canonical text is accepted (exact case, modifiers in the order `Ctrl`, `Alt`, `Shift`, `Win`, each once, the key last), so `parse_hotkey(s)?.to_string() == s` for every accepted `s`. Anything else is `hotkey.invalid` (decisions #26); `hotkey.no_modifier`, `hotkey.no_key`, `hotkey.esc_reserved` keep their own codes. The grammar is `voicen_core::settings::hotkey` (decisions #23 N1).
-- `HotkeyRegistrar` (trait defined by 004 with a fake; implemented by 001): `prepare(Hotkey, Mode) -> Result<Prepared, Unavailable>`, `commit(Prepared)`, `abort(Prepared)`.
+- `HotkeyRegistrar` (trait defined by 004 with a fake; implemented by 001): its members and fake are stated in [contracts/core-traits.md › `HotkeyRegistrar` and `DownloadedModels`](contracts/core-traits.md#hotkeyregistrar-and-downloadedmodels-defined-by-004-implemented-elsewhere).
 
 ## Autostart
 
