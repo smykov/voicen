@@ -58,7 +58,7 @@ use std::time::Duration;
 
 use tauri::test::{mock_context, noop_assets};
 use tauri::utils::assets::{AssetKey, AssetsIter, CspHash};
-use tauri::{App, AppHandle, Assets, Context, Manager, RunEvent, Wry};
+use tauri::{App, AppHandle, Assets, Context, Manager, RunEvent, WindowEvent, Wry};
 use timing_support::{eventually, eventually_tight, holds_for, measure, now, HANG};
 use voicen_core::diag::Log;
 use voicen_core::i18n;
@@ -276,9 +276,23 @@ fn run_with_driver<T: Send + 'static>(
     outcome: LoadOutcome,
     driver: impl FnOnce(AppHandle<Wry>) -> T + Send + 'static,
 ) -> (i32, T) {
+    run_with_driver_hooked(app, outcome, |_, _| {}, driver)
+}
+
+/// [`run_with_driver`] whose run callback first hands every event to `hook`, on the main
+/// thread, as tauri's own callback does it: for a window's `Destroyed` that is after
+/// tauri freed the label and before the window's own listeners ran (T-224).
+#[track_caller]
+fn run_with_driver_hooked<T: Send + 'static>(
+    app: App<Wry>,
+    outcome: LoadOutcome,
+    mut hook: impl FnMut(&AppHandle<Wry>, &RunEvent) + 'static,
+    driver: impl FnOnce(AppHandle<Wry>) -> T + Send + 'static,
+) -> (i32, T) {
     let (tx, rx) = mpsc::channel();
     let mut driver = Some(driver);
     let code = app.run_return(move |handle, event| {
+        hook(handle, &event);
         let ready = matches!(event, RunEvent::Ready);
         voicen_lib::on_run_event(handle, event, &outcome, false);
         if ready {
@@ -961,6 +975,160 @@ struct GoneReport {
     one_after_hidden_and_recording: bool,
     new_warnings: Vec<String>,
     log: Vec<String>,
+}
+
+/// What the run-event hook saw at the overlay's outside `Destroyed` (T-224).
+#[derive(Debug, Default, Clone, Copy)]
+struct GapFacts {
+    /// The hook ran for the overlay's `Destroyed` after the driver armed it.
+    ran: bool,
+    /// tauri no longer knew the label `overlay` at that moment (it frees it before the
+    /// window's own listeners, which is where the overlay thread learns of the loss).
+    label_free: bool,
+    /// The receipt after a Processing published in that gap, waited for at most
+    /// `SETTLE` while the main thread was held (a hold, not a verdict): `Some` means
+    /// the overlay thread settled on that state while the main thread was held.
+    receipt_in_gap: Option<Settled>,
+}
+
+#[derive(Debug, Default)]
+struct GapReport {
+    first: Shown,
+    gap: GapFacts,
+    /// The receipt for the state published in the gap, read after the main thread was
+    /// released.
+    newer: Shown,
+    /// Exactly the label's window is shown, visible (receipt came, and `SETTLE` after).
+    one_after_gap: bool,
+    shown_after_gap: Vec<(isize, String)>,
+    new_warnings: Vec<String>,
+    log: Vec<String>,
+}
+
+#[test]
+fn a_shown_state_published_in_the_gap_before_the_overlays_destroyed_listener_rebuilds_the_overlay()
+{
+    // T-224 (T-173 r1#1): tauri frees the label `overlay` before the window's own
+    // `Destroyed` listener runs (the run callback comes first), and the overlay thread
+    // learns of a lost window only from that listener. A shown state taken in that gap
+    // is answered with an Emit to a window tauri no longer has: `emit_to` returns Ok,
+    // the receipt settles `{seq, window: true}` on the stale handle, and the late
+    // Destroyed then arrives with no newer state: no overlay at all. Here the run-event
+    // hook, on the main thread at the outside destroy's `Destroyed` (label freed,
+    // listeners not yet run), publishes Processing and holds the main thread until the
+    // receipt covers it or `SETTLE` passed. After the release the overlay must exist
+    // and be visible, and the receipt must say so.
+    // Bite: no label probe on the overlay's wake (red: "receipt {seq, window: true} but
+    // no overlay window"); a probe that asks `IsWindow` instead of the label (the
+    // build then fails with "label already exists", a warning, no window); a probe that
+    // ignores the newest state (the late Destroyed rebuilds nothing).
+    let _serial = serial();
+    let _watchdog = watchdog(
+        "a_shown_state_published_in_the_gap_before_the_overlays_destroyed_listener_rebuilds_the_overlay",
+    );
+    let dir = TempDir::new();
+    let (app, outcome) = wry_app(dir.path());
+    let logs_of = dir.path().to_path_buf();
+    let armed = Arc::new(AtomicBool::new(false));
+    let gap = Arc::new(Mutex::new(GapFacts::default()));
+
+    let hook = {
+        let armed = Arc::clone(&armed);
+        let gap = Arc::clone(&gap);
+        move |handle: &AppHandle<Wry>, event: &RunEvent| {
+            let RunEvent::WindowEvent {
+                label,
+                event: WindowEvent::Destroyed,
+                ..
+            } = event
+            else {
+                return;
+            };
+            if label != LABEL || !armed.swap(false, Ordering::SeqCst) {
+                return;
+            }
+            let label_free = handle.get_webview_window(LABEL).is_none();
+            ShellIndicator::new(handle).set_overlay(&OverlayState::Processing);
+            // Holds the main thread: unfixed the thread settles at once (an Emit to the
+            // gone window); fixed it asks for a build, which waits for this thread.
+            let receipt_in_gap = voicen_lib::overlay::settled(handle, SETTLE);
+            *gap.lock().unwrap_or_else(PoisonError::into_inner) = GapFacts {
+                ran: true,
+                label_free,
+                receipt_in_gap,
+            };
+        }
+    };
+
+    let driver_gap = Arc::clone(&gap);
+    let (code, report) = run_with_driver_hooked(app, outcome, hook, move |handle| {
+        let indicator = ShellIndicator::new(&handle);
+        let mut report = GapReport::default();
+        indicator.set_overlay(&OverlayState::Recording);
+        report.first = shown(&handle);
+        if !report.first.ok() {
+            report.log = logged(&logs_of);
+            return report;
+        }
+        let warnings_before = warnings(&logged(&logs_of)).len();
+        armed.store(true, Ordering::SeqCst);
+        if let Some(window) = handle.get_webview_window(LABEL) {
+            let _ = window.destroy();
+        }
+        // The hook has finished (its hold included) when `ran` is set.
+        let ran = || {
+            driver_gap
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .ran
+        };
+        let _ = eventually(ran);
+        report.gap = *driver_gap.lock().unwrap_or_else(PoisonError::into_inner);
+        // The receipt for the state published in the gap, read once the main thread runs.
+        report.newer = shown(&handle);
+        let one_visible = |handle: &AppHandle<Wry>| {
+            let shown = shown_windows(&[]);
+            shown.len() == 1 && overlay_hwnd(handle) == Some(shown[0].0)
+        };
+        report.one_after_gap =
+            report.newer.ok() && one_visible(&handle) && holds_for(SETTLE, || one_visible(&handle));
+        report.shown_after_gap = shown_windows(&[]);
+        let lines = logged(&logs_of);
+        report.new_warnings = warnings(&lines)
+            .get(warnings_before..)
+            .map(<[_]>::to_vec)
+            .unwrap_or_default();
+        report.log = lines;
+        report
+    });
+
+    assert!(
+        report.first.ok(),
+        "Recording showed no visible `{LABEL}` window after the overlay receipt: {:?}; \
+         the app's log: {:#?}",
+        report.first,
+        report.log
+    );
+    assert!(
+        report.gap.ran && report.gap.label_free,
+        "premise: the run-event hook must see the overlay's Destroyed with the label already \
+         freed by tauri: {:?}",
+        report.gap
+    );
+    assert!(
+        report.one_after_gap,
+        "receipt {:?} (in the gap, main thread held: {:?}) but no overlay window: the shown \
+         windows are {:?} (want exactly the `{LABEL}` window, visible, when the receipt came \
+         and for {SETTLE:?} after); the app's log: {:#?}",
+        report.newer, report.gap.receipt_in_gap, report.shown_after_gap, report.log
+    );
+    assert!(
+        report.new_warnings.is_empty(),
+        "the app logged warnings while the overlay was rebuilt (a build against a label \
+         tauri still held, e.g. \"label already exists\"): {:#?}",
+        report.new_warnings
+    );
+    assert_eq!(code, 0, "run_return code after end_loop(0)");
 }
 
 #[test]
