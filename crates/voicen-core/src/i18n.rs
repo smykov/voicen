@@ -1789,7 +1789,7 @@ mod tests {
         // two RU speaker labels. Bite: any of these drifting from the contract, the
         // RU labels translated differently.
         let c = catalog(EN_JSON, RU_JSON);
-        let en: [(&str, &str); 25] = [
+        let en: [(&str, &str); 26] = [
             ("tray.call", "Call"),
             ("tray.call.record", "Record"),
             ("tray.call.stop", "Stop"),
@@ -1848,6 +1848,8 @@ mod tests {
             ),
             ("speaker.me", "Me"),
             ("speaker.other", "Other party"),
+            // T-255 (decisions #377): the catch-all names no folder, file or command.
+            ("calls.error.io", "Could not complete the action."),
         ];
         let mut wrong = Vec::new();
         for (id, want) in en {
@@ -1858,7 +1860,11 @@ mod tests {
                 ));
             }
         }
-        for (id, want) in [("speaker.me", "Я"), ("speaker.other", "Собеседник")] {
+        for (id, want) in [
+            ("speaker.me", "Я"),
+            ("speaker.other", "Собеседник"),
+            ("calls.error.io", "Не удалось выполнить действие."),
+        ] {
             if own_text(&c, UiLanguage::Ru, id) != Some(want) {
                 wrong.push(format!(
                     "{id} (Ru): {:?}, expected {want:?}",
