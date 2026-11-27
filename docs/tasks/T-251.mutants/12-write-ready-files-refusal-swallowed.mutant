@@ -1,0 +1,8 @@
+guarantee: I2 caller 1: final pass ends failed: storage on an invalid transcript.json text
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: test-writer
+--- old
+        .map_err(|(rule, segment)| ReadyWriteError::Invalid(rule, segment))?;
+--- new
+        .unwrap_or_default();
+--- end

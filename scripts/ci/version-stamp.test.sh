@@ -120,7 +120,8 @@ EOF
 
 failed=0
 passed=0
-fail() { echo "FAIL $label: $1" >&2; sed 's/^/       | /' <<<"$out" >&2; failed=$((failed + 1)); ok=0; }
+# T-179 (I-6): a case counts once however many of its assertions fail (each is still printed).
+fail() { echo "FAIL $label: $1" >&2; sed 's/^/       | /' <<<"$out" >&2; [ "$ok" = 1 ] && failed=$((failed + 1)); ok=0; }
 done_case() { [ "$ok" = 1 ] && { echo "ok   $label"; passed=$((passed + 1)); }; }
 
 # run <label> <tree dir> <args...>: runs the script on the tree with GITHUB_ENV=$tmp/env (one
@@ -149,6 +150,22 @@ mk_tree "$tmp/want-58" 0.1.58 0.1.58 0.1.58 0.1.58
 run branch-58 branch main 58 "$tmp/branch"
 want_rc 0; want_line 'version: 0.1.58'
 same_tree "$tmp/want-58" "$tmp/branch" "the expected stamped tree (0.1.58 in five places, decoys kept)"
+env_is $'OTHER=keep\nVOICEN_VERSION=0.1.58'
+done_case
+
+# T-179 (I-4, T-077 r1#1): a Windows checkout has CRLF line ends in the version files; the stamped
+# tree must equal the expected CRLF tree (no line loses or gains a CR).
+mk_tree "$tmp/crlf" 0.1.0 0.1.0 0.1.0 0.1.0
+mk_tree "$tmp/want-crlf" 0.1.58 0.1.58 0.1.58 0.1.58
+for f in Cargo.toml Cargo.lock package.json src-tauri/tauri.conf.json; do
+  for d in crlf want-crlf; do
+    sed -i 's/$/\r/' "$tmp/$d/$f"
+  done
+done
+run branch-58-crlf branch main 58 "$tmp/crlf"
+want_rc 0; want_line 'version: 0.1.58'
+same_tree "$tmp/want-crlf" "$tmp/crlf" "the expected CRLF stamped tree (0.1.58 in five places, CR kept on every line)"
+grep -q $'\r' "$tmp/crlf/Cargo.lock" || fail "the fixture lost its CRs (the case does not test CRLF)"
 env_is $'OTHER=keep\nVOICEN_VERSION=0.1.58'
 done_case
 
@@ -199,7 +216,7 @@ bad() {
   ! grep -q '^version: ' <<<"$out" || fail "a version line was printed on a refused input"
 }
 
-for t in v1.2 vfoo v01.2.3 1.2.3 v1.2.3-rc1 v1.2.3.4 v1.65536.0; do
+for t in v1.2 vfoo v01.2.3 1.2.3 v1.2.3-rc1 v1.2.3.4 v1.65536.0 v1x2x3; do
   bad "tag-$t" "$t" 0.1.0 0.1.0 0.1.0 0.1.0 -- tag "$t" 58
   done_case
 done

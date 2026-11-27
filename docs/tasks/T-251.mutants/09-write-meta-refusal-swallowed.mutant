@@ -1,0 +1,15 @@
+guarantee: AC failure branch: write_meta refusal returns Ok and writes nothing (I1, swallowed at the origin)
+file: crates/voicen-core/src/call/storage.rs
+added_by: test-writer
+--- old
+    if !shaped {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "meta does not fit its call folder",
+        ));
+    }
+--- new
+    if !shaped {
+        return Ok(());
+    }
+--- end

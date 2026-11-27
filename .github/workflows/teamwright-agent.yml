@@ -174,6 +174,15 @@ jobs:
             echo "::warning::no pnpm on the runner: the ui area cannot run here"
           fi
 
+      - name: Prebuild before the stage
+        id: prebuild
+        run: |
+          set -euo pipefail
+          # T-261 (decisions #361): the gate's Rust builds start in the background while the session
+          # reads; the step ends at once, "Prebuild report" after the stage reports the outcome.
+          nohup bash scripts/ci/contour-prebuild.sh > /dev/null 2>&1 &
+          echo "Prebuild started; its log is $RUNNER_TEMP/prebuild.log on the runner."
+
       - name: The stage
         id: claude
         timeout-minutes: 240
@@ -201,6 +210,24 @@ jobs:
           # steps after it (the push step pins its own env).
           env -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_OUTPUT -u GITHUB_STATE claude -p "/teamwright:$STAGE $TASK_ID" --model "$MODEL" --max-turns 200 --plugin-dir "$TEAMWRIGHT_PLUGIN_DIR" --mcp-config "$RUNNER_TEMP/mcp.json" --strict-mcp-config --permission-mode acceptEdits --allowedTools "Bash,Read,Edit,Write,Glob,Grep,Agent,Task,TodoWrite,Skill,mcp__serena__get_symbols_overview,mcp__serena__find_symbol,mcp__serena__find_referencing_symbols,mcp__serena__find_implementations,mcp__serena__find_declaration,mcp__context7" --append-system-prompt "$SYSTEM_PROMPT" --output-format stream-json --verbose > "$OUT/session.jsonl"
           echo "The session ended; its stream is in $OUT/session.jsonl on the runner."
+
+      - name: Prebuild report
+        if: always() && steps.prebuild.outcome == 'success'
+        run: |
+          # T-261: inline, runs nothing of the tree (the session can edit it); never fails the job.
+          # A sequence still running is stopped (its process group), then its container removed.
+          pid="$(cat "$RUNNER_TEMP/prebuild.pid" 2>/dev/null || true)"
+          if [[ "$pid" =~ ^[0-9]+$ ]]; then
+            kill -TERM -- "-$pid" 2>/dev/null || true
+            sleep 2
+          fi
+          docker rm -f "tw-prebuild-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >/dev/null 2>&1 || true
+          rc="$(cat "$RUNNER_TEMP/prebuild.rc" 2>/dev/null || true)"
+          rc="${rc//[[:space:]]/}"
+          if [ "$rc" != 0 ]; then
+            echo "::warning::the prebuild did not finish cleanly (exit code '${rc:-none}'; $RUNNER_TEMP/prebuild.log on the runner): the session's first gate built more itself"
+          fi
+          exit 0
 
       # T-236 (F-032): the count, the push of task/<ID> and the uncommitted patch run on every
       # ending of the session (success, failure, timeout, cancel), so a stage that runs out of time

@@ -1,0 +1,12 @@
+guarantee: AC-2 UI failure: copy rejected -> one alert (swallowed at the page, copy() catch)
+file: src/routes/history/+page.svelte
+added_by: test-writer
+test: node scripts/ui-test-select.mjs src/lib/history e2e/history.spec.ts
+--- old
+      copyFailed = true;
+    }
+  }
+--- new
+    }
+  }
+--- end

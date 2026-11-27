@@ -127,7 +127,8 @@ mk_dist() {
 
 failed=0
 passed=0
-fail() { echo "FAIL $label: $1" >&2; sed 's/^/       | /' <<<"$out" >&2; failed=$((failed + 1)); ok=0; }
+# T-179 (I-6): a case counts once however many of its assertions fail (each is still printed).
+fail() { echo "FAIL $label: $1" >&2; sed 's/^/       | /' <<<"$out" >&2; [ "$ok" = 1 ] && failed=$((failed + 1)); ok=0; }
 done_case() { [ "$ok" = 1 ] && { echo "ok   $label"; passed=$((passed + 1)); }; }
 
 # call <label> <view> <create> <token|-|empty> <args...>: runs release.sh from a work dir with the
@@ -249,7 +250,6 @@ mk_dist "$tmp/dist" "$inst"
 call refuse-gh-view-not-found-other error-404 ok "$token" v0.1.200 100 "$tmp/repo" "$tmp/dist"
 want_nonzero; gh_no_write; dist_unchanged
 grep -qE -- '^release view v0\.1\.200' "$tmp/gh.log" || fail "the release-exists check did not run"
-! grep -qE -- '^release create ' "$tmp/gh.log" || fail "gh release create was called after a 404 from release view: $(tr '\n' '|' < "$tmp/gh.log")"
 done_case
 # T-101: no symbols zip beside the installer: release-check.sh refuses, no write.
 mk_dist "$tmp/dist" "$inst" nozip

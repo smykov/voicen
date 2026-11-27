@@ -366,12 +366,19 @@ pub fn export_markdown(transcript: &TranscriptV1, title: &str, names: &[Speaker]
 
 /// The JSON of an export (FR-036): the compact [`TranscriptV1::to_json`] text of the transcript
 /// with `title` and `names` (from meta.json, FR-035) replacing its own; every other field is
-/// the transcript's.
-pub fn export_json(transcript: &TranscriptV1, title: &str, names: &[Speaker]) -> String {
+/// the transcript's. It is also the text of `transcript.json` on every write that carries the
+/// meta.json names. The value serialized must pass [`TranscriptV1::validate`] (T-251, decision
+/// #372): a segment speaker `names` lacks is that error, and no text is produced.
+pub fn export_json(
+    transcript: &TranscriptV1,
+    title: &str,
+    names: &[Speaker],
+) -> Result<String, (InvalidRule, u32)> {
     let mut named = transcript.clone();
     named.title = title.to_string();
     named.speakers = names.to_vec();
-    named.to_json()
+    named.validate()?;
+    Ok(named.to_json())
 }
 
 /// Why a call title or a speaker name was refused (T-152, FR-035).
@@ -1802,7 +1809,10 @@ mod tests {
         // that does not parse back or fails validate().
         let t = load(FULL);
         let names = renamed_names();
-        let text = export_json(&t, "Renamed call", &names);
+        let text = match export_json(&t, "Renamed call", &names).ok() {
+            Some(text) => text,
+            None => panic!("the export of valid names is refused"),
+        };
         let back = match TranscriptV1::from_json(&text) {
             Ok(back) => back,
             Err(e) => panic!("the export does not parse back: {e:?}"),
@@ -1819,6 +1829,68 @@ mod tests {
             want.to_json(),
             "compact schema-1 text in section 7 order"
         );
+    }
+
+    #[test]
+    fn export_json_refuses_a_segment_speaker_missing_from_names() {
+        // T-251 I2 (owner decision #372): the value export_json serializes passes validate();
+        // FULL has lines of `me` and `s1`, so a names list without either is refused, and the
+        // refusal carries no text. Bite: no validate before to_json (the invalid JSON is
+        // returned); a validate of the transcript's own speakers (they are valid); the error
+        // turned into a fill of the missing speaker.
+        let t = load(FULL);
+        let only_me = vec![Speaker {
+            id: "me".into(),
+            name: "Alice".into(),
+        }];
+        assert_eq!(export_json(&t, "t", &only_me).ok(), None, "s1 missing");
+        let only_s1 = vec![Speaker {
+            id: "s1".into(),
+            name: "Bob".into(),
+        }];
+        assert_eq!(export_json(&t, "t", &only_s1).ok(), None, "me missing");
+        assert_eq!(export_json(&t, "t", &[]).ok(), None, "no names at all");
+    }
+
+    #[test]
+    fn export_json_accepts_a_names_list_with_a_speaker_no_segment_uses() {
+        // T-251 I2 characterization (green before and after): the refusal is for a speaker a
+        // segment names, not for an extra entry. Bite: a validation that demands the lists be
+        // equal.
+        let t = load(FULL);
+        let mut names = renamed_names().to_vec();
+        names.push(Speaker {
+            id: "s2".into(),
+            name: "Carol".into(),
+        });
+        let text = match export_json(&t, "t", &names).ok() {
+            Some(text) => text,
+            None => panic!("an extra speaker is refused"),
+        };
+        let back = load(&text);
+        assert_eq!(back.validate(), Ok(()));
+        assert_eq!(back.speakers, names);
+    }
+
+    #[test]
+    fn a_segment_without_a_lang_key_parses_validates_and_is_written_with_lang_null() {
+        // T-251 I5 / T-123 r4#1 characterization (green before and after): a missing `lang`
+        // reads as null (serde's default for an Option) and passes validate; core always
+        // writes the key. Pins the contract sentence. Bite: `lang` made a required key (parse
+        // refused), a skip_serializing_if on `lang` (the key missing from the text).
+        let without_lang = concat!(
+            r#"{"schema":1,"call_id":"2026-10-30_140509","title":"t","#,
+            r#""started_at":"2026-10-30T14:05:09+03:00","duration_ms":60000,"#,
+            r#""speakers":[{"id":"me","name":"Me"},{"id":"s1","name":"Other party"}],"#,
+            r#""segments":[{"start_ms":0,"end_ms":2000,"track":"mic","speaker":"me","text":"Hello","source":"final"}],"#,
+            r#""engines":{"transcription":"api:whisper-1","diarization":null}}"#
+        );
+        let t = load(without_lang);
+        assert_eq!(t.segments.first().map(|s| s.lang.clone()), Some(None));
+        assert_eq!(t.validate(), Ok(()));
+        let written = t.to_json();
+        assert!(written.contains(r#""lang":null"#), "{written}");
+        assert_eq!(load(&written), t);
     }
 
     // ---- T-152: the name check and the speaker rename ----------------------------------

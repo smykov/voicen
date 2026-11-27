@@ -172,8 +172,8 @@ pub use crash::{
     ModuleResolver, OsVersion, ThreadName, CRASH_MAX_AGE_DAYS, CRASH_MAX_FILES,
 };
 pub use event::{
-    DetectorTag, DictationLine, DictationOutcome, EndTag, EngineTag, FailureTag, LoadKind,
-    LogEvent, PreviousSessionLine, SaveLine, TestConnectionLine, WarningKind,
+    DetectorTag, DictationLine, DictationOutcome, EndTag, EngineTag, FailureTag, HistoryFailKind,
+    LoadKind, LogEvent, PreviousSessionLine, SaveLine, TestConnectionLine, WarningKind,
 };
 pub use format::format_line;
 pub use log::{Log, LogConfig, LogsUnwritableReason, OnUnwritable};

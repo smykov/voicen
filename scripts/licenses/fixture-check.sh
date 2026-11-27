@@ -3,15 +3,17 @@
 # licenses/fixtures/gpl/ (a GPL-3.0-only crate and a crate without a license), must
 # FAIL and reject both crates as errors. If it passes, the Rust license check is toothless.
 #
-# Required, all three (cargo-about 0.9.2 output forms):
+# Required, all three (cargo-about 0.9.2 output forms) for the GPL fixture:
 #   1. a non-zero exit;
 #   2. "error: failed to satisfy license requirements" whose diagnostic points at
 #      gpl-fixture/Cargo.toml and its "GPL-3.0-only" (the GPL crate is named only by path);
 #   3. a line starting "error: unable to synthesize license expression for 'nolicense-fixture"
 #      -- without --fail cargo-about prints the same text as a [WARN] only, which must
 #      NOT satisfy the guard (a mere mention of the crate name is not enough).
+# And (T-181) cargo-about with about.toml plus a later top-level `accepted = ["MIT"]`
+# (target/licenses/about-dup.toml) must exit non-zero saying "duplicate key".
 #
-# Exit 0: all three hold. Exit 1: any is missing (guard broken).
+# Exit 0: all hold. Exit 1: any is missing (guard broken).
 # Exit 3: cannot run (cargo-about missing from the core image, docker missing, no network);
 #         never reported as a license result.
 set -uo pipefail
@@ -65,4 +67,31 @@ if [ -n "$missing" ]; then
   cat "$plain" >&2
   exit 1
 fi
-echo "licenses-check: fixture guard ok: cargo-about rejects gpl-fixture (GPL-3.0-only) and nolicense-fixture (no license) as errors"
+# 4. (T-181, I-5) cargo-about refuses a later top-level `accepted` (duplicate key), which
+#    accepted.mjs relies on: the real about.toml, byte for byte, plus `accepted = ["MIT"]`,
+#    on a temp copy (about.toml itself is never edited). The config error comes before any
+#    download; a network failure is still "cannot run".
+dup="$out/about-dup.toml"
+duplog="$out/fixture-dup.log"
+{ cat about.toml && printf '%s\n' 'accepted = ["MIT"]'; } >"$dup" \
+  || { echo "licenses-check: cannot run: could not write $dup" >&2; exit 3; }
+scripts/tw-run core -- cargo about generate --fail \
+  --manifest-path licenses/fixtures/gpl/Cargo.toml -c "$dup" \
+  -o "$out/fixture-dup.txt" about.hbs >"$duplog" 2>&1
+dupstatus=$?
+if [ "$dupstatus" -eq 0 ]; then
+  echo "licenses-check: FAIL: cargo-about accepted $dup (about.toml plus a later top-level accepted); the duplicate key refusal accepted.mjs relies on is gone (output in $duplog)" >&2
+  exit 1
+fi
+if grep -Eqi 'failed to download|could not resolve host|network|spurious' "$duplog"; then
+  echo "licenses-check: cannot run: no network for cargo-about (output in $duplog)" >&2
+  exit 3
+fi
+dupplain="$out/fixture-dup.plain.log"
+sed 's/\x1b\[[0-9;]*m//g' "$duplog" >"$dupplain"
+if ! grep -qi 'duplicate key' "$dupplain"; then
+  echo "licenses-check: FAIL: cargo-about exited $dupstatus on $dup but did not say duplicate key (output follows):" >&2
+  cat "$dupplain" >&2
+  exit 1
+fi
+echo "licenses-check: fixture guard ok: cargo-about rejects gpl-fixture (GPL-3.0-only) and nolicense-fixture (no license) as errors, and a later top-level accepted (duplicate key)"

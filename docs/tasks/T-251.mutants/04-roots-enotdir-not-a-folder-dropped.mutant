@@ -1,0 +1,8 @@
+guarantee: I3: a root under a regular file is NotAFolder on every OS (probe)
+file: crates/voicen-core/src/settings/roots.rs
+added_by: test-writer
+--- old
+        io::ErrorKind::NotADirectory => UnwritableReason::NotAFolder,
+--- new
+        io::ErrorKind::NotADirectory => UnwritableReason::Other,
+--- end

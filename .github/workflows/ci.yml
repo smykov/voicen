@@ -2,8 +2,8 @@ name: CI
 
 on:
   # wip/** (T-066, P-016, decisions #90; check-ci-wip): a task's CI-only head push (pre-push: not
-  # a delivery) runs this workflow before review; workflow_dispatch (T-202, #253) lets the contour
-  # start that run (a job-token push starts none); release, upload and Telegram stay push-only.
+  # a delivery) runs this workflow before review unless it changes only task records; the contour
+  # starts it by workflow_dispatch (T-202, #253: a job-token push starts none); release, upload and Telegram stay push-only.
   push:
     branches: [main, "wip/**"]
     tags: ["v*"]
@@ -1213,8 +1213,13 @@ jobs:
           $runValue = '"' + $exe + '" --autostart'
           $fake = 'sk-test-ci-uninstall-0000-not-a-real-key'
           $kept = @('Voicen/ci-uninstall', 'VoicenOther/ci-uninstall-keep')
+          # T-207: the pre-T-062 WebView2 folder and a sibling next to it (the failure branch).
+          $legacy = Join-Path $env:LOCALAPPDATA 'dev.voicen.app'
+          $legacyFile = Join-Path $legacy 'EBWebView\ci-legacy.txt'
+          $sibling = Join-Path $env:LOCALAPPDATA 'dev.voicen.app.keep'
+          $siblingFile = Join-Path $sibling 'ci-keep.txt'
           function Get-RunValue { (Get-ItemProperty -Path $run -Name 'Voicen' -ErrorAction SilentlyContinue).Voicen }
-          function Remove-All { $failed = 0; foreach ($t in $kept) { try { Remove-VoicenCredential -Target $t } catch { $failed++; Write-Host "cleanup: $($_.Exception.Message)" } }; Remove-ItemProperty -Path $run -Name 'Voicen' -ErrorAction SilentlyContinue; $failed }
+          function Remove-All { $failed = 0; foreach ($t in $kept) { try { Remove-VoicenCredential -Target $t } catch { $failed++; Write-Host "cleanup: $($_.Exception.Message)" } }; Remove-ItemProperty -Path $run -Name 'Voicen' -ErrorAction SilentlyContinue; Remove-Item -LiteralPath $legacy, $sibling -Recurse -Force -ErrorAction SilentlyContinue; $failed }
           Stop-AllVoicen
           if (-not (Test-Path -LiteralPath $settings -PathType Leaf)) { throw "premise: settings.json not found at $settings before the reinstall" }
           $settingsHash = (Get-FileHash -LiteralPath $settings -Algorithm SHA256).Hash
@@ -1232,6 +1237,13 @@ jobs:
             }
           } catch { [void](Remove-All); throw }
           Write-Output "premise: settings.json, ci-keep.txt, the Run value '$runValue' and $($kept -join ', ') in place"
+          # T-207 (decisions #345 Q1): plant the pre-T-062 folder and a sibling; the /P reinstall (the
+          # old uninstaller with /UPDATE /P, then the installer) must remove the folder and only it.
+          Remove-Item -LiteralPath $legacy, $sibling -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path (Split-Path -Parent $legacyFile), $sibling | Out-Null
+          Set-Content -LiteralPath $legacyFile -Value 'ci legacy webview2 data' -NoNewline
+          Set-Content -LiteralPath $siblingFile -Value 'ci sibling, must survive' -NoNewline
+          foreach ($q in @($legacyFile, $siblingFile)) { if (-not (Test-Path -LiteralPath $q -PathType Leaf)) { [void](Remove-All); throw "premise: T-207 planted file $q not found" } }
           $setup = Get-ChildItem target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
           $p = Start-Process $setup.FullName -ArgumentList '/P' -PassThru
           $null = $p.Handle
@@ -1265,6 +1277,10 @@ jobs:
           foreach ($t in $kept) { if (-not (Test-VoicenCredential -Target $t)) { $bad += "$t was deleted by the reinstall" } }
           $after = Get-RunValue
           if ($after -ne $runValue) { $bad += "the HKCU Run value Voicen is '$after' after the reinstall, expected '$runValue' (kept on an installer-started uninstall)" }
+          # T-207 (Acceptance 1, red on today's hooks: nothing removes the folder).
+          if (Test-Path -LiteralPath $legacy) { $bad += "T-207: $legacy is still present after the /P reinstall (left: $((@(Get-ChildItem -LiteralPath $legacy -Recurse -Force -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName.Substring($legacy.Length) }) | Select-Object -First 20) -join ', '))" }
+          # T-207 (Acceptance 4, failure branch, green today): only the folder itself is removed.
+          if (-not (Test-Path -LiteralPath $siblingFile -PathType Leaf)) { $bad += "T-207: the sibling $siblingFile was deleted by the /P reinstall (a removal matched more than $legacy)" }
           $cleanup = Remove-All
           if ($bad) { throw ($bad -join '; ') }
           if ($cleanup -ne 0) { throw "cleanup: a Remove-VoicenCredential above failed (Win32 error printed)" }
@@ -1517,9 +1533,23 @@ jobs:
           $clsidKey = 'HKCU:\Software\Classes\CLSID\{163266b0-4b55-446a-bbbe-e31cac2c713a}'
           $fake = 'sk-test-ci-keepdata-0000-not-a-real-key'
           $target = 'Voicen/ci-keepdata'
+          # T-207: the pre-T-062 WebView2 folder (with a junction to a sentinel outside it and, later, a
+          # locked file) and a sibling next to it.
+          $legacy = Join-Path $env:LOCALAPPDATA 'dev.voicen.app'
+          $legacyFile = Join-Path $legacy 'EBWebView\ci-legacy.txt'
+          $legacyLink = Join-Path $legacy 'link'
+          $lockedFile = Join-Path $legacy 'locked\ci-locked.bin'
+          $sibling = Join-Path $env:LOCALAPPDATA 'dev.voicen.app.keep'
+          $siblingFile = Join-Path $sibling 'ci-keep.txt'
+          $elsewhere = Join-Path $env:RUNNER_TEMP 'legacy-elsewhere'
+          $elsewhereFile = Join-Path $elsewhere 'sentinel.txt'
+          $lock = $null
           function Get-RunValue { (Get-ItemProperty -Path $run -Name 'Voicen' -ErrorAction SilentlyContinue).Voicen }
           function Get-UninstallerCopies { @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path.StartsWith([IO.Path]::GetTempPath(), [StringComparison]::OrdinalIgnoreCase) -and $_.Path -like '*\~nsu*' }) }
-          function Remove-All { $failed = 0; try { Remove-VoicenCredential -Target $target } catch { $failed++; Write-Host "cleanup: $($_.Exception.Message)" }; $failed }
+          function Remove-Link([string]$p) { if (Test-Path -LiteralPath $p) { $i = Get-Item -LiteralPath $p -Force; if ($i.LinkType) { $i.Delete() } } }
+          function Remove-Legacy { if ($lock) { $lock.Dispose() }; Remove-Link $legacyLink; Remove-Item -LiteralPath $legacy, $sibling, $elsewhere -Recurse -Force -ErrorAction SilentlyContinue }
+          function Invoke-Setup { $sp = Start-Process $setup.FullName -ArgumentList '/S' -PassThru; $null = $sp.Handle; if (-not $sp.WaitForExit(120000)) { Stop-Process -Id $sp.Id -Force -ErrorAction SilentlyContinue; throw "the silent install did not finish within 120 s" }; $sp.ExitCode }
+          function Remove-All { $failed = 0; try { Remove-VoicenCredential -Target $target } catch { $failed++; Write-Host "cleanup: $($_.Exception.Message)" }; Remove-Legacy; $failed }
           Stop-AllVoicen
           foreach ($p in @($exe, $uninstaller, $settings, $shortcut)) { if (-not (Test-Path -LiteralPath $p -PathType Leaf)) { throw "premise: $p not found before the uninstall" } }
           if (-not (Test-Path -LiteralPath $uninstKey)) { throw "premise: the uninstall key $uninstKey not found before the uninstall" }
@@ -1531,6 +1561,18 @@ jobs:
             if (-not (Test-VoicenCredential -Target $target)) { throw "premise: $target was written but Test-VoicenCredential does not find it" }
           } catch { [void](Remove-All); throw }
           Write-Output "premise: installed, settings.json, ci-keep.txt, the Run value and $target in place"
+          # T-207 (decisions #345 Q2): plant the folder, a junction inside it to a sentinel outside it, a
+          # file to lock later, and the sibling; /KEEPDATA keeps the folder with the data.
+          Remove-Link $legacyLink
+          Remove-Item -LiteralPath $legacy, $sibling, $elsewhere -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path (Split-Path -Parent $legacyFile), (Split-Path -Parent $lockedFile), $sibling, $elsewhere | Out-Null
+          Set-Content -LiteralPath $legacyFile -Value 'ci legacy webview2 data' -NoNewline
+          Set-Content -LiteralPath $lockedFile -Value 'ci locked legacy file' -NoNewline
+          Set-Content -LiteralPath $siblingFile -Value 'ci sibling, must survive' -NoNewline
+          Set-Content -LiteralPath $elsewhereFile -Value 'ci sentinel behind the junction' -NoNewline
+          New-Item -ItemType Junction -Path $legacyLink -Target $elsewhere | Out-Null
+          if ((Get-Item -LiteralPath $legacyLink -Force).LinkType -cne 'Junction') { [void](Remove-All); throw "premise: T-207 $legacyLink is not a junction" }
+          foreach ($q in @($legacyFile, $lockedFile, $siblingFile, $elsewhereFile, (Join-Path $legacyLink 'sentinel.txt'))) { if (-not (Test-Path -LiteralPath $q -PathType Leaf)) { [void](Remove-All); throw "premise: T-207 planted file $q not found" } }
           $p = Start-Process -FilePath $uninstaller -ArgumentList '/S', '/KEEPDATA' -PassThru
           $done = $false
           $clock = [Diagnostics.Stopwatch]::StartNew()
@@ -1550,14 +1592,40 @@ jobs:
           if (Test-Path -LiteralPath $shortcut) { $bad += "the shortcut $shortcut is still present after the uninstall" }
           # T-213 (I7, Acceptance 8): /KEEPDATA keeps data, not the toast activator registration.
           if (Test-Path -LiteralPath $clsidKey) { $bad += "the registry key $clsidKey is still present after uninstall.exe /S /KEEPDATA" }
+          # T-207 (Acceptance 2, green today and guards a removal keyed on the uninstall alone): /KEEPDATA keeps the legacy folder with the data.
+          if (-not (Test-Path -LiteralPath $legacyFile -PathType Leaf)) { $bad += "T-207: /KEEPDATA removed $legacyFile (the uninstall removes the legacy folder only when it removes the data)" }
+          if (-not (Test-Path -LiteralPath $siblingFile -PathType Leaf)) { $bad += "T-207: the sibling $siblingFile was deleted by uninstall.exe /S /KEEPDATA" }
           if ($bad) { [void](Remove-All); Remove-ItemProperty -Path $run -Name 'Voicen' -ErrorAction SilentlyContinue; throw ($bad -join '; ') }
           Write-Output "uninstall /S /KEEPDATA: data folder, settings.json, ci-keep.txt and $target kept; Run value, shortcut, uninstall key, voicen.exe and uninstall.exe gone"
           # Reinstall for W4: a silent install over the kept data folder.
           $setup = Get-ChildItem target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
-          Start-Process $setup.FullName -ArgumentList '/S' -Wait
+          # T-207 (decisions #345 Q1, Q3): this silent install runs no uninstaller, so the installer alone must
+          # remove the legacy folder. A file of it is held open exclusively across the install: the install
+          # still exits 0, the rest of the folder is removed without a message, and the locked file is left.
+          try {
+            $lock = [System.IO.File]::Open($lockedFile, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+            $exit1 = Invoke-Setup
+          } catch { [void](Remove-All); throw }
           foreach ($q in @($exe, $uninstaller, $shortcut, $marker)) { if (-not (Test-Path -LiteralPath $q -PathType Leaf)) { [void](Remove-All); throw "after the silent reinstall: $q not found" } }
-          if ((Remove-All) -ne 0) { throw "cleanup: a Remove-VoicenCredential above failed (Win32 error printed)" }
-          Write-Output "silent reinstall over the kept data: voicen.exe, uninstall.exe, the shortcut and ci-keep.txt present"
+          $bad = @()
+          if ($exit1 -ne 0) { $bad += "T-207: the silent reinstall with a locked file in $legacy exited with $exit1, expected 0 (a locked file must not fail the install)" }
+          if (-not (Test-Path -LiteralPath $lockedFile -PathType Leaf)) { $bad += "T-207 premise: the locked file $lockedFile is gone while it was held open" }
+          if (Test-Path -LiteralPath $legacyFile) { $bad += "T-207: $legacyFile is still present after the silent reinstall (only the locked file may remain)" }
+          if (-not (Test-Path -LiteralPath $elsewhereFile -PathType Leaf)) { $bad += "T-207: the sentinel $elsewhereFile behind the junction $legacyLink was deleted: the installer's removal went through a reparse point" }
+          if (-not (Test-Path -LiteralPath $siblingFile -PathType Leaf)) { $bad += "T-207: the sibling $siblingFile was deleted by the silent reinstall" }
+          # Released, the next install retries the remainder.
+          $lock.Dispose()
+          $lock = $null
+          try { $exit2 = Invoke-Setup } catch { [void](Remove-All); throw }
+          if ($exit2 -ne 0) { $bad += "T-207: the second silent reinstall exited with $exit2, expected 0" }
+          if (Test-Path -LiteralPath $legacy) { $bad += "T-207: $legacy is still present after the second silent reinstall, the first one's locked remainder was not retried (left: $((@(Get-ChildItem -LiteralPath $legacy -Recurse -Force -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName.Substring($legacy.Length) }) | Select-Object -First 20) -join ', '))" }
+          if (-not (Test-Path -LiteralPath $elsewhereFile -PathType Leaf)) { $bad += "T-207: the sentinel $elsewhereFile behind the junction $legacyLink was deleted by the second silent reinstall" }
+          if (-not (Test-Path -LiteralPath $siblingFile -PathType Leaf)) { $bad += "T-207: the sibling $siblingFile was deleted by the second silent reinstall" }
+          foreach ($q in @($exe, $uninstaller, $shortcut, $marker)) { if (-not (Test-Path -LiteralPath $q -PathType Leaf)) { $bad += "after the second silent reinstall: $q not found" } }
+          $cleanup = Remove-All
+          if ($bad) { throw ($bad -join '; ') }
+          if ($cleanup -ne 0) { throw "cleanup: a Remove-VoicenCredential above failed (Win32 error printed)" }
+          Write-Output "silent reinstall over the kept data: voicen.exe, uninstall.exe, the shortcut and ci-keep.txt present; $legacy emptied around a locked file (exit 0), removed by the next install, sentinel and sibling kept"
       # W4: a user-started silent uninstall (the default answer Yes) removes the program and the
       # data in %LOCALAPPDATA%\Voicen except calls\ (a planted calls\2026-01-01_000000\meta.json
       # must survive, T-156 / FR-041) and every Voicen/ credential (voicen.exe --purge-credentials
@@ -1586,7 +1654,12 @@ jobs:
           function Get-RunValue { (Get-ItemProperty -Path $run -Name 'Voicen' -ErrorAction SilentlyContinue).Voicen }
           function Get-UninstallerCopies { @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path.StartsWith([IO.Path]::GetTempPath(), [StringComparison]::OrdinalIgnoreCase) -and $_.Path -like '*\~nsu*' }) }
           function Format-Listed { (@(Get-VoicenCredentials -Prefix 'Voicen/') | ForEach-Object { "$($_.Target) (type $($_.Type))" }) -join ', ' }
-          function Remove-All { $failed = 0; foreach ($t in @($gone, $outsider)) { try { Remove-VoicenCredential -Target $t } catch { $failed++; Write-Host "cleanup: $($_.Exception.Message)" } }; Remove-ItemProperty -Path $run -Name 'Voicen' -ErrorAction SilentlyContinue; $failed }
+          # T-207: the pre-T-062 WebView2 folder and a sibling next to it (decisions #345 Q2: this uninstall removes the data).
+          $legacy = Join-Path $env:LOCALAPPDATA 'dev.voicen.app'
+          $legacyFile = Join-Path $legacy 'EBWebView\ci-legacy.txt'
+          $sibling = Join-Path $env:LOCALAPPDATA 'dev.voicen.app.keep'
+          $siblingFile = Join-Path $sibling 'ci-keep.txt'
+          function Remove-All { $failed = 0; foreach ($t in @($gone, $outsider)) { try { Remove-VoicenCredential -Target $t } catch { $failed++; Write-Host "cleanup: $($_.Exception.Message)" } }; Remove-ItemProperty -Path $run -Name 'Voicen' -ErrorAction SilentlyContinue; Remove-Item -LiteralPath $legacy, $sibling -Recurse -Force -ErrorAction SilentlyContinue; $failed }
           Stop-AllVoicen
           foreach ($p in @($exe, $uninstaller, $settings, $marker, $shortcut)) { if (-not (Test-Path -LiteralPath $p -PathType Leaf)) { throw "premise: $p not found before the uninstall" } }
           if (-not (Test-Path -LiteralPath $uninstKey)) { throw "premise: the uninstall key $uninstKey not found before the uninstall" }
@@ -1603,6 +1676,11 @@ jobs:
             if (@(Get-VoicenCredentials -Prefix 'Voicen/' | Where-Object { $_.Target -ceq $gone }).Count -ne 1) { throw "premise: Get-VoicenCredentials 'Voicen/' does not list $gone (listed: $(Format-Listed))" }
           } catch { [void](Remove-All); throw }
           Write-Output "premise: installed, settings.json, ci-keep.txt, planted $meta, the Run value, $gone and $outsider in place"
+          Remove-Item -LiteralPath $legacy, $sibling -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path (Split-Path -Parent $legacyFile), $sibling | Out-Null
+          Set-Content -LiteralPath $legacyFile -Value 'ci legacy webview2 data' -NoNewline
+          Set-Content -LiteralPath $siblingFile -Value 'ci sibling, must survive' -NoNewline
+          foreach ($q in @($legacyFile, $siblingFile)) { if (-not (Test-Path -LiteralPath $q -PathType Leaf)) { [void](Remove-All); throw "premise: T-207 planted file $q not found" } }
           $p = Start-Process -FilePath $uninstaller -ArgumentList '/S' -PassThru
           $done = $false
           $clock = [Diagnostics.Stopwatch]::StartNew()
@@ -1626,6 +1704,10 @@ jobs:
           if (Test-Path -LiteralPath $shortcut) { $bad += "the shortcut $shortcut is still present after the uninstall" }
           if (Test-Path -LiteralPath $uninstKey) { $bad += "the uninstall key $uninstKey is still present after the uninstall" }
           if ((Get-UninstallerCopies).Count -gt 0) { $bad += "an uninstaller copy in %TEMP% is still running 60 s after the start" }
+          # T-207 (Acceptance 2, red on today's hooks: nothing removes the folder, also with calls\ kept).
+          if (Test-Path -LiteralPath $legacy) { $bad += "T-207: $legacy is still present after uninstall.exe /S (left: $((@(Get-ChildItem -LiteralPath $legacy -Recurse -Force -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName.Substring($legacy.Length) }) | Select-Object -First 20) -join ', '))" }
+          # T-207 (Acceptance 4, failure branch, green today): the sibling survives.
+          if (-not (Test-Path -LiteralPath $siblingFile -PathType Leaf)) { $bad += "T-207: the sibling $siblingFile was deleted by uninstall.exe /S (a removal matched more than $legacy)" }
           $cleanup = Remove-All
           if ($bad) { throw ($bad -join '; ') }
           if ($cleanup -ne 0) { throw "cleanup: a Remove-VoicenCredential above failed (Win32 error printed)" }

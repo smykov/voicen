@@ -72,6 +72,12 @@ export interface SettingsView {
    * invalid URL. The window shows it as given and parses no URL (settings-ui W).
    */
   provider_host: string | null;
+  /**
+   * T-232 (spec 007 US9 #3, decisions #306, #373): true while the call slot's last
+   * registration attempt failed (core reads the shell's `CallHotkeyMark` at view build
+   * time). The Calls tab marks `calls.hotkey` from the saved view only; it never infers it.
+   */
+  call_hotkey_unavailable: boolean;
 }
 
 /** One key slot's edit: keep, delete, or replace with the typed key (UI -> shell only). */

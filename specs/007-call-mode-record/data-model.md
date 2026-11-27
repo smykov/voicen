@@ -106,7 +106,7 @@ A refused start (`Refused { part, reason }`) leaves no track open and no folder,
 | `ratio_adj` | `f64` | Clamped to ±500 ppm. |
 | `reanchor_threshold` | 40 ms | Above it, zeros are inserted or overlap is dropped at once. |
 
-Invariant: after any sequence of blocks and gaps, `|written_mic − written_system|` measured at the same stamp is ≤ 20 ms (tested, FR-011 allows 100 ms).
+Invariant: after any sequence of blocks and gaps, `|written_mic − written_system|` measured at the same stamp is under 40 ms: an offset below `reanchor_threshold` is left to the slow loop for tens of seconds, so one track can sit up to 39 ms off (`a_block_39_ms_ahead_is_left_to_the_slow_loop`); under steady ±50 ppm drift it is ≤ 20 ms per track and between tracks (tested). FR-011 allows 100 ms.
 
 ## Chunk (final pass, in memory only)
 
@@ -181,7 +181,7 @@ Warnings stay in the indicator's list until dismissed (FR-006); a warning equal 
 
 ## Tray state
 
-`TrayState` gains `CallRecording`. The shown state is a pure function with precedence dictation `HotkeyError` > dictation `Recording` > `CallRecording` > `Error` > `Idle` (FR-006), tested over every combination (core `tray::shown(dictation, call_recording)`; no call-side input yields `HotkeyError`, FR-004). `CallRecording` shows the red-dot Recording icon and its own tooltip (`tray.tooltip.call_recording`). The tray menu table, top to bottom (decision #197 D2, D3): submenu "Call" { "Record" (check, checked iff `call_recording`), "Stop" (enabled iff `call_recording`) }, "Calls", "Settings", "Open logs folder", "Exit" last; core `tray::menu(retry_available, call_recording)`.
+`TrayState` gains `CallRecording`. The shown state is a pure function with precedence dictation `HotkeyError` > dictation `Recording` > `CallRecording` > `Error` > `Idle` (FR-006), tested over every combination (core `tray::shown(dictation, call_recording)`; no call-side input yields `HotkeyError`, FR-004). `CallRecording` shows the red-dot Recording icon and its own tooltip (`tray.tooltip.call_recording`). The tray menu table, top to bottom (decision #197 D2, D3): submenu "Call" { "Record" (check, checked iff `call_recording`), "Stop" (enabled iff `call_recording`) }, "Calls", "Settings", "History" (T-022), "Open logs folder", "Exit" last; core `tray::menu(retry_available, call_recording)`.
 
 ## Log events
 

@@ -1,15 +1,15 @@
 name: CI
 
 on:
-  # wip/** (T-066, P-016, decisions #90): the orchestrator's CI-only push of a task's head
-  # (git push origin HEAD:wip/<ID>; pre-push: not a delivery) runs this whole workflow before
-  # review, so a premise only CI can run is never first run on main. Pinned by make check
-  # (check-ci-wip).
+  # wip/** (T-066, P-016, decisions #90; check-ci-wip): a task's CI-only head push (pre-push: not
+  # a delivery) runs this workflow before review unless it changes only task records; the contour
+  # starts it by workflow_dispatch (T-202, #253: a job-token push starts none); release, upload and Telegram stay push-only.
   push:
     branches: [main]
     tags: ["v*"]
     paths-ignore: ["docs/tasks/**"]
   pull_request:
+  workflow_dispatch:
 
 # A newer push to the same wip/<ID> cancels the run of the older head (P-016 counts only the
 # reviewed head). Other refs (main, tags, pull requests) get a group per run: a shared group
@@ -31,8 +31,12 @@ jobs:
       - uses: actions/checkout@v5
       - run: make check
   windows:
-    runs-on: windows-2025
+    name: Windows build, install and smoke test
     needs: gate
+    runs-on: windows-latest
+    # T-230: the job's own bound, 4x the longest windows job of 40 green runs (no step runs past it);
+    # this head is the owned copy scripts/ci/windows-head.yml (release-guard.sh R15; edit both together).
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v5
       - name: Premise - release-check on every ref (no token)

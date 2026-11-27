@@ -5,14 +5,14 @@
 	check-core-test-os-answer check-core-test-deadlines check-webview-data check-ci-wip check-telegram-send check-telegram-failure-branch \
 	check-version-stamp check-release-check check-release check-release-guard check-nsis-fork check-e2e-entry-fixtures check-area-image-fixtures \
 	check-whisper-cmake-cache check-opus-cmake-cache check-whisper-model-key check-crt-imports check-whisper \
-	check-shell-windows check-ban-canary check-role-tools check-guard-trigger check-wip-push check-wip-run check-contour-busy check-contour-label check-serena-pin check-test-guard \
+	check-shell-windows check-ban-canary check-role-tools check-guard-trigger check-wip-push check-task-push check-wip-run check-contour-busy check-contour-prebuild check-contour-label check-serena-pin check-test-guard \
 	check-ui core-image ui-image core-image-present \
 	licenses licenses-check licenses-unit licenses-fixture licenses-rust licenses-bundle \
 	licenses-npm licenses-generate licenses-stale licenses-stale-guard
 
 # check-ban-canary and check-shell-windows after check-core: both build voicen-core, so a core
 # error is reported first by the faster native check-core, before the slower runs.
-check: check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtures check-ci-credentials check-role-tools check-guard-trigger check-wip-push check-wip-run check-contour-busy check-contour-label check-serena-pin check-test-guard \
+check: check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtures check-ci-credentials check-role-tools check-guard-trigger check-wip-push check-task-push check-wip-run check-contour-busy check-contour-prebuild check-contour-label check-serena-pin check-test-guard \
 	check-clippy-lines \
 	check-core-test-os-answer check-core-test-deadlines check-webview-data check-ci-wip check-telegram-send check-telegram-failure-branch check-version-stamp check-release-check check-release check-release-guard check-nsis-fork check-whisper-cmake-cache check-opus-cmake-cache check-whisper-model-key check-crt-imports check-core check-whisper \
 	check-ban-canary check-shell-windows check-e2e-entry-fixtures check-area-image-fixtures check-ui \
@@ -98,6 +98,18 @@ check-guard-trigger:
 check-wip-push:
 	scripts/ci/tw-wip-push.test.sh
 
+# check-task-push (T-265, decisions #364, #366, #367): scripts/tw-task-push <ID>, run from the main
+# tree, writes only refs/heads/task/<ID> on origin from the head of tw/<ID> checked out in a linked
+# worktree (create, or force-with-lease over the remote's current head; the pre-push hook of the main
+# tree runs, DRAIN is skipped by the script's own fixed override) and refuses anything else with no ref
+# moved: another ref, a bad argument, a run from a worktree, a foreign head, .github/ in the diff or
+# the record's front matter, a dirty worktree, a pause, a lease mismatch. The permission settings
+# allow it next to the two tw-wip-push rules and no git push. The self-test copies the script into a
+# temporary main tree with a linked worktree and a temporary bare remote; no network transport is
+# allowed. Host bash, git, python3.
+check-task-push:
+	scripts/ci/tw-task-push.test.sh
+
 # check-test-guard (T-189, decisions #201): the kit-managed PreToolUse hook scripts/hooks/test-guard.sh
 # judges a command behind the `systemd-run` scope prefix like the command it runs: a direct test or
 # gate run (cargo test, make check, pnpm test, tw-run <area> -- cargo test, a cut of tw-test output)
@@ -125,6 +137,15 @@ check-wip-run:
 # .github/workflows and that both owned contour heads hold per-task concurrency groups. Host bash, jq.
 check-contour-busy:
 	scripts/ci/contour-busy.test.sh
+
+# check-contour-prebuild (T-261, decisions #361): the contour's background prebuild. scripts/ci/contour-prebuild.sh runs
+# the gate's own `scripts/tw-run core -- ...` lines of check-core, check-whisper and check-shell-windows (the cargo
+# test line with --no-run appended) under one timeout, writes $RUNNER_TEMP/prebuild.rc and never exits non-zero. The
+# self-test compares those lines with this file's recipe lines byte for byte, runs the script against a stub
+# TW_DOCKER (argv, exit codes, timeout and docker rm -f) and runs the report step's run: block of
+# scripts/ci/contour-prebuild-report.yml (one ::warning:: unless the rc is 0, exit 0). Host bash.
+check-contour-prebuild:
+	scripts/ci/contour-prebuild.test.sh
 
 # check-contour-label (T-231): the label start of the contour. scripts/ci/contour-label.sh is the only parser
 # of a labelled Issue's title (LC_ALL=C, ^(T-[0-9]{3,}): ; prints start <T-NNN> or bad <why>, no title bytes).
@@ -210,9 +231,10 @@ check-version-stamp:
 
 # T-026 (decisions #102, #103): "release job version check". scripts/ci/release-check.sh, the one
 # release verdict of ci.yml (release job and the windows job's premise / failure branch), accepts
-# a tag vX.Y.Z only when X.Y is the committed MAJOR.MINOR, Z >= the run number, exactly one
-# installer carries _X.Y.Z_ and (with GH_TOKEN) no release exists; every refusal exits 1 naming
-# both values, and it never calls a gh write subcommand. Stub gh on PATH, offline. Host bash.
+# a tag vX.Y.Z only when X.Y is the committed MAJOR.MINOR, Z >= the run number, there is exactly
+# one installer and the leftmost _N.N.N_ of its name equals X.Y.Z (T-179) and (with GH_TOKEN) no
+# release exists; every refusal exits 1 naming both values, it never calls a gh write subcommand
+# and never writes GITHUB_ENV. Stub gh on PATH, offline. Host bash.
 check-release-check:
 	scripts/ci/release-check.test.sh
 

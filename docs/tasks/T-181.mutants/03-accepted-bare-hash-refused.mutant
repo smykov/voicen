@@ -1,0 +1,8 @@
+guarantee: T-094 r2#1: a bare `#` / `    #` comment line is read as a comment (isComment line === indent + '#' branch)
+file: scripts/licenses/accepted.mjs
+added_by: test-writer
+--- old
+  return line === `${indent}#` || line.startsWith(`${indent}# `);
+--- new
+  return line.startsWith(`${indent}# `);
+--- end

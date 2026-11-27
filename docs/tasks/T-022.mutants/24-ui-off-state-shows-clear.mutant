@@ -1,0 +1,10 @@
+guarantee: AC-2 UI: history off -> no entries and no Clear (off window asks for no clear)
+file: src/lib/history/HistoryList.svelte
+added_by: test-writer
+test: node scripts/ui-test-select.mjs src/lib/history e2e/history.spec.ts
+--- old
+    <button type="button" onclick={onOpenSettings}>{t("history.open_settings")}</button>
+--- new
+    <button type="button" onclick={onOpenSettings}>{t("history.open_settings")}</button>
+    <button type="button" onclick={onClear}>{t("history.clear")}</button>
+--- end

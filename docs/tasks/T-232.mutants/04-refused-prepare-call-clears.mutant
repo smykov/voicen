@@ -1,0 +1,11 @@
+guarantee: failure branch: a refused call-hotkey save keeps the mark
+file: crates/voicen-core/src/hotkey_registrar.rs
+added_by: test-writer
+--- old
+        if state.fail_prepare_call {
+            return Err(Unavailable);
+--- new
+        if state.fail_prepare_call {
+            state.call_hotkey_unavailable = false;
+            return Err(Unavailable);
+--- end

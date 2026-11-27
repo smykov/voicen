@@ -485,6 +485,8 @@ check v-vars-index             1 R4 "@VARS['RELEASE_PAT']"      # the word vars,
 # part of the value, so the PAT expression is live).
 check v-secrets-after-allowed   1 R4 '@}}${{ secrets.RELEASE_PAT' # S1: ${{ secrets.TELEGRAM_CHAT_ID }}${{ secrets.RELEASE_PAT }}
 check v-secrets-in-comment-line 1 R4 '@# ${{ secrets.RELEASE_PAT' # S2: T: "x / # ${{ secrets.RELEASE_PAT }}"
+# T-179 (T-085 v2): R4 holds past the second allowed occurrence on a line (BOT_TOKEN, CHAT_ID, then an unlisted secret).
+check v-secret-third-on-line    1 R4 '@}}${{ secrets.RELEASE_PAT' # T: ${{ secrets.TELEGRAM_BOT_TOKEN }}${{ secrets.TELEGRAM_CHAT_ID }}${{ secrets.RELEASE_PAT }}
 
 # ---- R6: no YAML escape that spells a character or joins two lines ----------------------------
 # Review 1 finding 3 (probes P3, P4): each reads, to a YAML reader, as text R3-R5 refuse.
@@ -1013,6 +1015,117 @@ for pm in "teamwright-agent.yml|$ag_push| push \"\$url\"" "teamwright-next.yml|$
     echo "FAIL mutation: real $pcn without the pause check's exit 0 line did not apply (the check has no '            exit 0' line)" >&2
     failed=$((failed + 1))
   fi
+done
+# ---- T-261 (decisions #361): the contour's prebuild steps, pinned on the real agent file ----------------------------
+# Not a release-guard.sh rule (it would refuse every ok-contour fixture lacking the steps), as the T-215 pause pin.
+# '      - name: Prebuild before the stage' (owned copy scripts/ci/contour-prebuild.yml) sits right after
+# 'MCP servers and toolchain images' and right before 'The stage'; '      - name: Prebuild report' (owned copy
+# scripts/ci/contour-prebuild-report.yml) lies between 'The stage' and 'Did the stage commit?'. Each title occurs
+# once, the file's lines from the title for the copy's length equal the copy byte for byte, and an empty line follows.
+pb_pre_title='      - name: Prebuild before the stage'
+pb_rep_title='      - name: Prebuild report'
+pb_pre_frag=scripts/ci/contour-prebuild.yml
+pb_rep_frag=scripts/ci/contour-prebuild-report.yml
+pb_mcp='      - name: MCP servers and toolchain images'
+pb_stage='      - name: The stage'
+pb_did='      - name: Did the stage commit?'
+# pb_frag_ok <agent file> <title> <fragment>: once, byte for byte over the fragment's length, then an empty line.
+pb_frag_ok() {
+  local f="$1" t="$2" frag="$3" s len
+  [ -f "$frag" ] || return 1
+  [ "$(grep -c -x -F -- "$t" "$f")" = 1 ] || return 1
+  s="$(grep -n -x -F -- "$t" "$f" | cut -d: -f1)"
+  len="$(wc -l < "$frag" | tr -d ' ')"
+  [ "$len" -gt 1 ] || return 1
+  cmp -s <(sed -n "${s},$((s + len - 1))p" "$f") "$frag" || return 1
+  awk -v n="$((s + len))" 'NR == n && $0 == "" { ok = 1 } END { exit !ok }' "$f"
+}
+# pb_check <pre|rep> <agent file>: the whole pin of one step.
+pb_check() {
+  local k="$1" f="$2" t frag s len st dc prev
+  if [ "$k" = pre ]; then t="$pb_pre_title" frag="$pb_pre_frag"; else t="$pb_rep_title" frag="$pb_rep_frag"; fi
+  pb_frag_ok "$f" "$t" "$frag" || return 1
+  s="$(grep -n -x -F -- "$t" "$f" | cut -d: -f1)"
+  len="$(wc -l < "$frag" | tr -d ' ')"
+  st="$(grep -n -m 1 -x -F -- "$pb_stage" "$f" | cut -d: -f1)"
+  dc="$(grep -n -m 1 -x -F -- "$pb_did" "$f" | cut -d: -f1)"
+  [ -n "$st" ] && [ -n "$dc" ] || return 1
+  if [ "$k" = pre ]; then
+    # the empty line, then 'The stage'; the nearest step title before it is 'MCP servers and toolchain images'
+    [ "$((s + len + 1))" = "$st" ] || return 1
+    prev="$(awk -v s="$s" 'NR < s && /^      - name: / { p = $0 } END { print p }' "$f")"
+    [ "$prev" = "$pb_mcp" ]
+  else
+    [ "$st" -lt "$s" ] && [ "$s" -lt "$dc" ]
+  fi
+}
+not_pb_check() { ! pb_check "$@"; }
+pb_expect() { # <label> <kind>: a missing owned copy is its own clear FAIL
+  local label="$1" k="$2" frag
+  if [ "$k" = pre ]; then frag="$pb_pre_frag"; else frag="$pb_rep_frag"; fi
+  if [ ! -f "$frag" ]; then
+    echo "FAIL $label: missing $frag (the owned copy of the step; the developer creates it, together with the step in teamwright-agent.yml)" >&2
+    failed=$((failed + 1))
+  elif ! grep -q -x -F -- "$([ "$k" = pre ] && echo "$pb_pre_title" || echo "$pb_rep_title")" "$ag"; then
+    echo "FAIL $label: the step title is not a line of $ag (the step is missing)" >&2
+    failed=$((failed + 1))
+  else
+    expect "$label" pb_check "$k" "$ag"
+  fi
+}
+pb_expect "real agent: '${pb_pre_title#      - name: }' occurs once, is $pb_pre_frag byte for byte, an empty line and '${pb_stage#      - name: }' follow, its nearest step before is '${pb_mcp#      - name: }'" pre
+pb_expect "real agent: '${pb_rep_title#      - name: }' occurs once, is $pb_rep_frag byte for byte, an empty line follows, and it lies between '${pb_stage#      - name: }' and '${pb_did#      - name: }'" rep
+# pb_mutate <out> <op> <title> <len> [<target title>]: a copy of $ag with the step block (title through the empty
+# line after the fragment's length) changed (a line of it, the last line of the fragment), moved before the
+# target title, the empty line removed, the title doubled or an interloper step put before it. Returns 1 when the
+# title is not a line of $ag.
+pb_mutate() {
+  local out="$1" op="$2" t="$3" len="$4" tg="${5:-}" i s=-1 g=-1
+  local -a L R B
+  mapfile -t L < "$ag"
+  for i in "${!L[@]}"; do [ "${L[$i]}" = "$t" ] && { s=$i; break; }; done
+  [ "$s" -ge 0 ] || return 1
+  case "$op" in
+    change-first) L[s + 1]="${L[s + 1]} #x" ;;
+    change-last) L[s + len - 1]="${L[s + len - 1]} #x" ;;
+    noblank) unset "L[$((s + len))]" ;;
+    dup) L=("${L[@]:0:s}" "$t" "${L[@]:s}") ;;
+    interloper) L=("${L[@]:0:s}" "      - name: Interloper" "        run: 'true'" "" "${L[@]:s}") ;;
+    move)
+      B=("${L[@]:s:len+1}")
+      R=("${L[@]:0:s}" "${L[@]:s+len+1}")
+      for i in "${!R[@]}"; do [ "${R[$i]}" = "$tg" ] && { g=$i; break; }; done
+      [ "$g" -ge 0 ] || return 1
+      L=("${R[@]:0:g}" "${B[@]}" "${R[@]:g}") ;;
+  esac
+  printf '%s\n' "${L[@]}" > "$out"
+}
+# Failure branch (T-261 Acceptance 3): each pin must fail its predicate under one change; a mutation that did
+# not apply (title or fragment missing, nothing changed) is itself a FAIL.
+for pm in "pre|$pb_pre_title|$pb_pre_frag" "rep|$pb_rep_title|$pb_rep_frag"; do
+  IFS='|' read -r pk ptitle pfrag <<<"$pm"
+  plen=0
+  [ -f "$pfrag" ] && plen="$(wc -l < "$pfrag" | tr -d ' ')"
+  # the move targets hold spaces: one list entry per mutation, "op|target"
+  if [ "$pk" = pre ]; then
+    plist=("change-first" "change-last" "noblank" "dup" "interloper" "move|$pb_did" "move|$pb_mcp")
+  else
+    plist=("change-first" "change-last" "noblank" "dup" "move|$pb_stage" "move|      - name: Push task/<ID>, and wip/<ID> after implement")
+  fi
+  for pspec in "${plist[@]}"; do
+    pop="${pspec%%|*}"
+    ptg=""
+    [ "$pspec" != "$pop" ] && ptg="${pspec#*|}"
+    pn="pb-$pk-$pop-$(printf '%s' "$ptg" | tr -c 'A-Za-z0-9' '_' | cut -c1-24)"
+    mkdir -p "$tmp/$pn"
+    if [ "$plen" -gt 1 ] && pb_mutate "$tmp/$pn/teamwright-agent.yml" "$pop" "$ptitle" "$plen" "$ptg" && ! cmp -s "$ag" "$tmp/$pn/teamwright-agent.yml"; then
+      expect "mutation: real agent with the $pk step ($pop${ptg:+ before '${ptg#      - name: }'}) fails the pin" \
+        not_pb_check "$pk" "$tmp/$pn/teamwright-agent.yml"
+    else
+      echo "FAIL mutation: real agent with the $pk step ($pop${ptg:+ before '${ptg#      - name: }'}) did not apply (no '$ptitle' line in $ag, or no fragment $pfrag)" >&2
+      failed=$((failed + 1))
+    fi
+  done
 done
 expect "real agent: the push step takes its token from its own env and the hooks from the dispatched commit (HOOKS_FROM), not install-hooks.sh" \
   bash -c 'grep -q -x -F "          PUSH_TOKEN: \${{ github.token }}" <<<"$1" && grep -q -F "git archive \"\$HOOKS_FROM\" scripts/hooks" <<<"$1" && grep -q -F "core.hooksPath=" <<<"$1" && ! grep -q -F "install-hooks.sh" <<<"$1"' _ "$(ag_step "$ag_push")"
@@ -2605,6 +2718,10 @@ frag_case g-frag-alias-value gate-setup-node.yml "cannot run: setup-node fragmen
   '      VOICEN_V: &v "20.19"'
 frag_case g-frag-anchor-sn gate-setup-node.yml "cannot run: setup-node fragment holding an anchor (node-version: &v ...)" \
   's/^          node-version: "20.19"$/          node-version: \&v "20.19"/'
+# T-179 (T-088 r4#1): an anchor name starting with `&` (`&&v`) is not an `&&` of an if: line; only `&& `
+# (two ampersands and a space) is allowed in a fragment body.
+frag_case g-frag-anchor-ampersand-name gate-setup-node.yml "cannot run: setup-node fragment holding an anchor named &v spelled &&v (node-version: &&v ...)" \
+  's/^          node-version: "20.19"$/          node-version: \&\&v "20.19"/'
 frag_case g-frag-anchor-save-beside-and gate-cargo-save.yml "cannot run: cache/save fragment holding an anchor (key: &k ...) beside the && of its if: line" \
   's/^          key: /          key: \&k /'
 frag_ok g-frag-ok-save-if-second-and windows-pnpm-save.yml "ok: cache/save fragment whose if: holds a second && (&& is not an anchor)" \

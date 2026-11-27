@@ -1,0 +1,9 @@
+guarantee: AC-2 UI failure: copy rejected -> one alert (swallowed at the origin, historyApi.copyEntry)
+file: src/lib/history/historyApi.ts
+added_by: test-writer
+test: node scripts/ui-test-select.mjs src/lib/history e2e/history.spec.ts
+--- old
+  return invoke<null>("history_copy", { id });
+--- new
+  return invoke<null>("history_copy", { id }).catch(() => null);
+--- end

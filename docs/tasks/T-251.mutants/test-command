@@ -1,0 +1,2 @@
+# T-251: the task's tests (red-first and characterizations).
+cargo test -j 2 -p voicen-core --lib --test toast_support -- a_segment_without_a_lang_key write_atomic_removes_the_tmp probe_refuses_a_root export_under_a_file a_file_two_levels_up_the_path write_meta_ export_json_ rename_with_a_meta export_json_bytes_with names_on_disk_that_lack tmp_open_failed_with settings_write_atomic_leaves

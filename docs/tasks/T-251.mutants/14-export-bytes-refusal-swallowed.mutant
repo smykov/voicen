@@ -1,0 +1,8 @@
+guarantee: I2 caller 3: JSON export with names lacking a segment speaker is ioFailed
+file: crates/voicen-core/src/call/storage.rs
+added_by: test-writer
+--- old
+                export_json(&transcript, &meta.title, &meta.speakers).map_err(|_| unusable())?
+--- new
+                export_json(&transcript, &meta.title, &meta.speakers).unwrap_or_default()
+--- end

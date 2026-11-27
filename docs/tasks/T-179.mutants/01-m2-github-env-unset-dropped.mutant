@@ -1,0 +1,8 @@
+guarantee: I-3: release-check.sh never writes GITHUB_ENV (T-026 r1#3, N12)
+file: scripts/ci/release-check.sh
+added_by: test-writer
+--- old
+  if stamp="$(env -u GITHUB_ENV bash "$here/version-stamp.sh" branch release-check 1 "$work" 2>&1)"; then
+--- new
+  if stamp="$(bash "$here/version-stamp.sh" branch release-check 1 "$work" 2>&1)"; then
+--- end

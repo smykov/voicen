@@ -9,7 +9,7 @@
 #      forms on one raw token over the whole command text and reads no shell (T-198,
 #      analysis.decides_on; project hook contract, scripts/hooks/_hookio.py: deny = one JSON object
 #      with permissionDecision=deny, exit 0; allow = no output, exit 0).
-#   C. .claude/settings.json: allow holds the two script rules only, deny holds the push forms,
+#   C. .claude/settings.json: allow holds the two script rules and tw-task-push (T-265) only, deny holds the push forms,
 #      PreToolUse wires the hook.
 #   D. scripts/tw-launch keeps the kit's denials and states the exception and (T-199) the CI-read
 #      sentence, against a fake kit; a kit without the sentence or a denial is refused and nothing starts.
@@ -787,8 +787,8 @@ def matches(rule, command):
 def check(name, ok, detail=""):
     print(("ok " if ok else "FAIL ") + name + ("" if ok else " :: " + detail))
 
-want_allow = {"Bash(scripts/tw-wip-push)", "Bash(scripts/tw-wip-push *)"}
-check("allow holds exactly the two script rules", len(allow) == 2 and set(allow) == want_allow, repr(allow))
+want_allow = {"Bash(scripts/tw-wip-push)", "Bash(scripts/tw-wip-push *)", "Bash(scripts/tw-task-push *)"}
+check("allow holds exactly the two script rules and the tw-task-push rule (T-265)", len(allow) == 3 and set(allow) == want_allow, repr(allow))
 check("the script runs under allow, bare", any(matches(r, "scripts/tw-wip-push") for r in allow), repr(allow))
 check("the script runs under allow, with a commit", any(matches(r, "scripts/tw-wip-push 0123abc") for r in allow), repr(allow))
 

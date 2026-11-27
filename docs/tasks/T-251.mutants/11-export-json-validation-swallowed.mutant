@@ -1,0 +1,8 @@
+guarantee: I2: export_json refuses a segment speaker missing from names
+file: crates/voicen-core/src/call/transcript.rs
+added_by: test-writer
+--- old
+    named.validate()?;
+--- new
+    let _ = named.validate();
+--- end

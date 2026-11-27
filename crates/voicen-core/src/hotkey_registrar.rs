@@ -31,6 +31,13 @@ pub trait HotkeyRegistrar: Send + Sync {
     fn prepare_call(&self, _hotkey: Hotkey) -> Result<Prepared, Unavailable> {
         Err(Unavailable)
     }
+
+    /// T-232: whether the call slot's last registration attempt failed (e.g. the
+    /// call hotkey was taken at startup); read by `SettingsService::view_with`
+    /// into `SettingsView::call_hotkey_unavailable`. The default reports false.
+    fn call_hotkey_unavailable(&self) -> bool {
+        false
+    }
 }
 
 /// One recorded call on [`FakeHotkeyRegistrar`].
@@ -52,6 +59,9 @@ struct FakeRegistrarState {
     fail_prepare_call: bool,
     active: Option<(Hotkey, Mode)>,
     next_token: u64,
+    /// Tokens handed out by `prepare_call` (the call slot).
+    call_tokens: Vec<u64>,
+    call_hotkey_unavailable: bool,
 }
 
 /// In-memory [`HotkeyRegistrar`] with a call log and an injectable `prepare` failure.
@@ -61,6 +71,10 @@ struct FakeRegistrarState {
 ///   `Err(Unavailable)` until set back to `false`.
 /// - [`active`](Self::active): the committed hotkey and mode (`None` before the
 ///   first commit); `abort` and a failed `prepare` leave it unchanged.
+/// - [`set_call_hotkey_unavailable`](Self::set_call_hotkey_unavailable): the
+///   call-slot state read by `call_hotkey_unavailable`; a `commit` of a
+///   `prepare_call` token clears it, a dictation-slot commit and a failed
+///   `prepare_call` leave it.
 #[cfg(any(test, feature = "test-fakes"))]
 #[derive(Default)]
 pub struct FakeHotkeyRegistrar {
@@ -80,6 +94,12 @@ impl FakeHotkeyRegistrar {
     /// T-129: like [`fail_prepare`](Self::fail_prepare), for `prepare_call` only.
     pub fn fail_prepare_call(&self, fail: bool) {
         self.lock().fail_prepare_call = fail;
+    }
+
+    /// T-232: set the call-slot state as the hotkey thread would after a
+    /// failed (true) or successful (false) registration of the call slot.
+    pub fn set_call_hotkey_unavailable(&self, unavailable: bool) {
+        self.lock().call_hotkey_unavailable = unavailable;
     }
 
     pub fn calls(&self) -> Vec<RegistrarCall> {
@@ -121,6 +141,7 @@ impl HotkeyRegistrar for FakeHotkeyRegistrar {
         }
         state.next_token += 1;
         let id = state.next_token;
+        state.call_tokens.push(id);
         Ok(Prepared {
             hotkey,
             mode: Mode::Toggle,
@@ -132,6 +153,13 @@ impl HotkeyRegistrar for FakeHotkeyRegistrar {
         let mut state = self.lock();
         state.calls.push(RegistrarCall::Commit(prepared.hotkey));
         state.active = Some((prepared.hotkey, prepared.mode));
+        if state.call_tokens.contains(&prepared.token) {
+            state.call_hotkey_unavailable = false;
+        }
+    }
+
+    fn call_hotkey_unavailable(&self) -> bool {
+        self.lock().call_hotkey_unavailable
     }
 
     fn abort(&self, prepared: Prepared) {

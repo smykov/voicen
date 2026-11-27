@@ -1,0 +1,138 @@
+#!/usr/bin/env bash
+# tw-task-push <ID> - the main-tree orchestrator's hand-off of a local worktree task to the contour
+# (T-265, decisions #364, #365, #366, #367).
+#
+# Writes refs/heads/task/<ID> on origin and nothing else, from the head of the local branch tw/<ID>
+# checked out in a linked worktree. <ID> is the one argument, matched against ^T-[0-9]{3,}$; it is
+# never a refspec or an option. Runs only in the main tree (git-dir equals git-common-dir), so git
+# runs the main tree's pre-push hook, never the copy on the task's branch.
+#
+# The push carries an expected-value lease taken from the remote at run time (absent ref: it must
+# still be absent), and no forced refspec, so a contour push in between is refused by git. The
+# remote-only commits it replaces are printed first, for the record.
+#
+# Refused, with no ref moved: a bad argument, a run outside the main tree, no linked worktree on
+# tw/<ID>, a dirty worktree (tracked changes, or untracked files outside .teamwright/tmp/), no fork
+# point from main, a path under .github/ in the diff from the fork point or the token .github/ in the
+# front matter of docs/tasks/<ID>.md at the pushed commit (a contour token cannot land workflow
+# edits), a missing record, TEAMWRIGHT_PAUSE in the main tree, the worktree or TEAMWRIGHT_PAUSE_FILE,
+# and a lease mismatch.
+#
+# DRAIN in pre-push is skipped only by this script's own fixed TEAMWRIGHT_WIP_REFS_RE, byte-equal to
+# the contour's (scripts/ci/contour-push.yml); every inherited push override is dropped.
+#
+# Exit 0: pushed. Any other exit: refused or the push failed; the push's own error is printed.
+set -uo pipefail
+
+refuse() {
+  echo "tw-task-push: REFUSED - $1" >&2
+  exit 2
+}
+
+# No repository, config or hook override comes in through the environment.
+unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_PREFIX
+unset GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT
+unset TEAMWRIGHT_ALLOW_PUSH TEAMWRIGHT_PUSH_STATUSES TEAMWRIGHT_DOC_PATHS_RE
+export TEAMWRIGHT_WIP_REFS_RE='^refs/heads/(wip|task)/'
+
+[ "$#" -eq 1 ] || refuse "takes exactly one task ID, got $# arguments"
+id="$1"
+[[ "$id" =~ ^T-[0-9]{3,}$ ]] || refuse "not a task ID (T-NNN): $id"
+src="refs/heads/tw/$id"
+dst="refs/heads/task/$id"
+
+top="$(git rev-parse --show-toplevel 2>/dev/null)" || refuse "not in a git working tree"
+cd "$top" || refuse "cannot enter $top"
+
+# The main tree only: its git dir is the common dir.
+gitdir="$(git rev-parse --absolute-git-dir 2>/dev/null)" || refuse "cannot find the git dir"
+common="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || refuse "cannot find the common dir"
+gitdir="$(cd "$gitdir" 2>/dev/null && pwd -P)" || refuse "cannot enter the git dir"
+common="$(cd "$common" 2>/dev/null && pwd -P)" || refuse "cannot enter the common dir"
+[ "$gitdir" = "$common" ] || refuse "run it from the main tree, not from a linked worktree"
+main_tree="$(pwd -P)"
+
+# The linked worktree holding the branch: a record of `git worktree list --porcelain -z` with the
+# literal line `branch refs/heads/tw/<ID>`. The first record is the main tree and never counts.
+wt=""
+cur=""
+first=1
+while IFS= read -r -d '' field; do
+  if [ -z "$field" ]; then
+    first=0
+    cur=""
+    continue
+  fi
+  case "$field" in
+    "worktree "*) cur="${field#worktree }" ;;
+  esac
+  if [ "$first" -eq 0 ] && [ "$field" = "branch $src" ] && [ -n "$cur" ]; then
+    wt="$cur"
+  fi
+done < <(git worktree list --porcelain -z 2>/dev/null)
+[ -n "$wt" ] || refuse "no linked worktree has $src checked out"
+wt_real="$(cd "$wt" 2>/dev/null && pwd -P)" || refuse "cannot enter the worktree $wt"
+[ "$wt_real" != "$main_tree" ] || refuse "$src is checked out in the main tree, not a linked worktree"
+
+# The pause. Each place counts on its own: the variable adds a file, it does not replace one.
+for pause in "${TEAMWRIGHT_PAUSE_FILE:-}" "$main_tree/TEAMWRIGHT_PAUSE" "$wt_real/TEAMWRIGHT_PAUSE"; do
+  [ -z "$pause" ] || [ ! -e "$pause" ] || refuse "team is paused ($pause exists)"
+done
+
+# A clean worktree: no tracked change, no untracked file outside .teamwright/tmp/ (#367).
+# NUL-separated entries become lines; a newline inside a name only adds lines, which refuse.
+status="$(git -C "$wt_real" status --porcelain=v1 -z --untracked-files=all 2>/dev/null | tr '\0' '\n')" \
+  || refuse "cannot read the status of $wt_real"
+while IFS= read -r entry; do
+  [ -n "$entry" ] || continue
+  case "$entry" in
+    "?? .teamwright/tmp/"*) ;;
+    *) refuse "the worktree $wt_real has uncommitted changes or untracked files" ;;
+  esac
+done <<<"$status"
+
+sha="$(git rev-parse --verify -q "$src^{commit}")" || refuse "no commit at $src"
+base=""
+for ref in refs/heads/main refs/remotes/origin/main; do
+  if git rev-parse --verify -q "$ref^{commit}" >/dev/null; then
+    base="$ref"
+    break
+  fi
+done
+[ -n "$base" ] || refuse "no main branch to find the fork point from"
+fork="$(git merge-base "$base" "$sha")" || refuse "$src has no fork point from main"
+git merge-base --is-ancestor "$fork" "$sha" || refuse "$src does not descend from the fork point $fork"
+
+# No path under .github/ in the diff from the fork point (renames split, so the old name counts).
+# NUL-separated names become lines; a newline inside a name only adds lines (fail-closed).
+paths="$(git diff --no-renames --name-only -z "$fork" "$sha" 2>/dev/null | tr '\0' '\n')" \
+  || refuse "cannot diff $fork..$sha"
+while IFS= read -r p; do
+  case "$p" in
+    .github/*) refuse "the task's diff touches .github/ ($p): a contour token cannot land it" ;;
+  esac
+done <<<"$paths"
+
+# The record at the pushed commit, and no .github/ token in its front matter (line 1 to the next
+# line that is exactly ---).
+record="$(git cat-file blob "$sha:docs/tasks/$id.md" 2>/dev/null)" || refuse "no docs/tasks/$id.md at $sha"
+front="$(awk 'NR == 1 { print; next } $0 == "---" { exit } { print }' <<<"$record")"
+case "$front" in
+  *.github/*) refuse "the front matter of docs/tasks/$id.md names .github/: a contour token cannot land it" ;;
+esac
+
+# The lease value: the remote's current head of the task ref, empty when it is absent.
+listing="$(git ls-remote origin "$dst")" || refuse "cannot read $dst from origin"
+expect=""
+while IFS=$'\t' read -r osha oref; do
+  [ "$oref" != "$dst" ] || expect="$osha"
+done <<<"$listing"
+
+if [ -n "$expect" ] && [ "$expect" != "$sha" ]; then
+  echo "tw-task-push: replacing origin $dst at $expect; commits only there:" >&2
+  git log --oneline "$sha..$expect" >&2 2>/dev/null || echo "  (not fetched here)" >&2
+fi
+
+# The refspec is explicit, so a configured push refspec and push.default do not apply; the two flags
+# stop push.followTags and push.recurseSubmodules from writing anything else.
+git push --no-follow-tags --no-recurse-submodules --force-with-lease="$dst:$expect" origin "$sha:$dst"

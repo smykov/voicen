@@ -1,0 +1,14 @@
+{
+ "agent_id": "a60a53cfb37cbbd00",
+ "agent_type": "task-validator",
+ "commit": "7019ff1d32543432b80541f812b9cc8039f9f1f0",
+ "gate": "verify",
+ "kind": "ui",
+ "path": "docs/tasks/T-232.verify/1.md",
+ "result": "PASS",
+ "round": 1,
+ "session_id": "c076ba22-370e-4996-aba9-f62116eb2003",
+ "sha256": "2c07cff336b4428eb6c35cb76885cabded5978f3099ff585d6c83204e616ec20",
+ "task": "T-232",
+ "ts": "2026-11-26T19:25:28Z"
+}

@@ -124,6 +124,7 @@ fn harness_with(
         temp_audio: store.clone(),
         observer: observer.clone(),
         post_processor: Arc::new(PassThrough),
+        transcript_sink: Arc::new(voicen_core::pipeline::DiscardTranscripts),
     };
     let pipeline = match timeouts {
         None => Pipeline::new(deps),

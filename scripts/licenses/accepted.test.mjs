@@ -35,9 +35,11 @@ test("the committed about.toml holds exactly the list of decisions #9 + #24", ()
 test("reads the owned head shape: comments, ids with WITH, in file order", () => {
   const toml = file([
     "# header comment",
+    "#",
     "# second header line",
     "accepted = [",
     "    # decision #9",
+    "    #",
     '    "MIT",',
     '    "Apache-2.0 WITH LLVM-exception",',
     '    # "GPL-3.0-only" was here once',
@@ -145,7 +147,7 @@ test("refused: a file that ends inside the head, without a closing bracket", () 
 });
 
 test("refused: a byte-order mark before the head", () => {
-  assert.throws(() => readAcceptedList(`﻿${file(HEAD)}`), REFUSED);
+  assert.throws(() => readAcceptedList(`\uFEFF${file(HEAD)}`), REFUSED);
 });
 
 test("refused: a lone CR anywhere in the head", () => {

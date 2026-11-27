@@ -48,6 +48,7 @@ use super::StorageOp;
 use crate::clock::{days_from_civil, MonotonicClock};
 use crate::diag::format::LocalTime;
 use crate::diag::{Log, LogEvent};
+use crate::files::{blocked_by_file, fill_and_rename};
 use crate::i18n::{text, UiLanguage, CALLS_TITLE_DEFAULT, SPEAKER_ME, SPEAKER_OTHER};
 use crate::settings::roots::{effective_root, reason_of, CallRoots, UnwritableReason};
 use crate::settings::CallSettings;
@@ -176,9 +177,39 @@ pub struct CallMeta {
 }
 
 /// The one `meta.json` writer: `meta.json.tmp` written and synced, then renamed over `meta.json`.
+///
+/// Refuses with `InvalidData`, before anything is written, a `meta` that [`read_meta`] would
+/// list as damaged for this folder by its shape ([`meta_shape_ok`]), and a folder whose name
+/// is not a call id: `meta.json` stays as it was and no tmp is created.
 pub fn write_meta(dir: &Path, meta: &CallMeta) -> io::Result<()> {
+    let folder = dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(CallId::parse);
+    let shaped = folder.is_some_and(|id| meta_shape_ok(meta, &id));
+    if !shaped {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "meta does not fit its call folder",
+        ));
+    }
     let bytes = serde_json::to_vec_pretty(meta).map_err(io::Error::other)?;
     write_atomic(dir, META_FILE, &bytes)
+}
+
+/// The structural half of [`read_meta`], shared by [`write_meta`] (T-251): schema
+/// [`META_SCHEMA`], `id` the folder's, tracks `[mic/mic.opus, system/system.opus]`, and a
+/// `failed` meta carries its failure. The track files' existence is not part of it (create
+/// writes meta.json before the tracks).
+fn meta_shape_ok(meta: &CallMeta, id: &CallId) -> bool {
+    let [mic, system] = &meta.tracks;
+    meta.schema == META_SCHEMA
+        && meta.id == *id
+        && mic.track == Track::Mic
+        && mic.file == MIC_FILE
+        && system.track == Track::System
+        && system.file == SYSTEM_FILE
+        && (meta.state != CallState::Failed || meta.failure.is_some())
 }
 
 /// The one meta lock (T-152): every read-modify-write of a non-recording call's `meta.json`
@@ -212,32 +243,12 @@ pub(crate) fn carry_disk_names(dir: &Path, meta: &mut CallMeta) {
 /// call created is removed (best effort); a tmp path it could not create is left as found.
 ///
 /// The call folder is ours, so the tmp is opened with `File::create`: a `<name>.tmp` left by
-/// a crash is replaced, not an error. The rest is the one tail [`fill_and_rename`].
+/// a crash is replaced, not an error. The rest is core's one tail [`fill_and_rename`].
 pub(crate) fn write_atomic(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
     let target = dir.join(name);
     let tmp = dir.join(format!("{name}.tmp"));
     let file = File::create(&tmp)?;
     fill_and_rename(file, &tmp, &target, bytes)
-}
-
-/// The one tmp+sync+rename tail of [`write_atomic`] and [`export_to`]: writes `bytes` to
-/// `file` (the open tmp at `tmp`, created by the caller), syncs its data, closes it and
-/// renames `tmp` over `target`. On any failure `tmp` is removed (best effort: the caller
-/// created it) and the first error is returned; `target` is untouched.
-fn fill_and_rename<W: SyncWrite>(
-    mut file: W,
-    tmp: &Path,
-    target: &Path,
-    bytes: &[u8],
-) -> io::Result<()> {
-    let synced = file.write_all(bytes).and_then(|()| file.sync_data());
-    drop(file);
-    let written = synced.and_then(|()| fs::rename(tmp, target));
-    if written.is_err() {
-        // Best effort: the tmp file is ours; the error returned is the write's own.
-        let _ = fs::remove_file(tmp);
-    }
-    written
 }
 
 /// What a start needs to name and describe the call.
@@ -993,7 +1004,10 @@ impl CallStore {
             read_transcript(&dir)?.ok_or_else(|| CallError::io_failed(io::ErrorKind::NotFound))?;
         let text = match format {
             Format::Md => export_markdown(&transcript, &meta.title, &meta.speakers),
-            Format::Json => export_json(&transcript, &meta.title, &meta.speakers),
+            // A meta.json whose names lack a segment speaker gives no valid JSON (T-251).
+            Format::Json => {
+                export_json(&transcript, &meta.title, &meta.speakers).map_err(|_| unusable())?
+            }
         };
         Ok(text.into_bytes())
     }
@@ -1077,10 +1091,10 @@ impl CallStore {
                 TRANSCRIPT_MD_FILE,
                 export_markdown(transcript, &meta.title, &meta.speakers).into_bytes(),
             ));
-            files.push((
-                TRANSCRIPT_FILE,
-                export_json(transcript, &meta.title, &meta.speakers).into_bytes(),
-            ));
+            // Refused before any write (T-251): nothing on disk changes.
+            let json =
+                export_json(transcript, &meta.title, &meta.speakers).map_err(|_| unusable())?;
+            files.push((TRANSCRIPT_FILE, json.into_bytes()));
         }
         let meta_bytes = serde_json::to_vec_pretty(meta).map_err(|_| unusable())?;
         files.push((META_FILE, meta_bytes));
@@ -1208,12 +1222,13 @@ pub fn export_to(target: &Path, bytes: &[u8]) -> Result<(), CallError> {
     fill_and_rename(file, &tmp, target, bytes).map_err(|e| CallError::io_failed(e.kind()))
 }
 
-/// The `ioFailed` of a tmp that could not be opened in `dir`. A `dir` that is a regular file
-/// is `not_a_folder` on every OS: Unix reports a path below a file as "not a directory",
-/// Windows as "path not found" (D4). Runs only after the open failed; it reads metadata and
-/// never creates or opens anything.
+/// The `ioFailed` of a tmp that could not be opened in `dir`. A `dir` whose nearest existing
+/// part is a regular file, wherever it is on the path, is `not_a_folder` on every OS: Unix
+/// reports a path below a file as "not a directory", Windows as "path not found" (D4,
+/// T-251). Runs only after the open failed; it reads metadata and never creates or opens
+/// anything.
 fn tmp_open_failed(dir: &Path, e: &io::Error) -> CallError {
-    if e.kind() == io::ErrorKind::NotFound && fs::metadata(dir).is_ok_and(|m| !m.is_dir()) {
+    if e.kind() == io::ErrorKind::NotFound && blocked_by_file(dir) {
         return CallError::io_failed(io::ErrorKind::NotADirectory);
     }
     CallError::io_failed(e.kind())
@@ -1392,17 +1407,9 @@ fn load_entry(root: &Path, id: CallId, active: bool) -> CallEntry {
 fn read_meta(dir: &Path, id: &CallId, active: bool) -> Option<(CallMeta, ListState)> {
     let bytes = fs::read(dir.join(META_FILE)).ok()?;
     let meta: CallMeta = serde_json::from_slice(&bytes).ok()?;
-    if meta.schema != META_SCHEMA || meta.id != *id {
-        return None;
-    }
-    let [mic, system] = &meta.tracks;
-    let tracks_ok = mic.track == Track::Mic
-        && mic.file == MIC_FILE
-        && system.track == Track::System
-        && system.file == SYSTEM_FILE
-        && dir.join(MIC_FILE).is_file()
-        && dir.join(SYSTEM_FILE).is_file();
-    if !tracks_ok {
+    let ok =
+        meta_shape_ok(&meta, id) && dir.join(MIC_FILE).is_file() && dir.join(SYSTEM_FILE).is_file();
+    if !ok {
         return None;
     }
     let state = match meta.state {
@@ -2024,17 +2031,25 @@ mod tests {
     #[test]
     fn write_meta_replaces_meta_json_and_leaves_no_tmp() {
         // Bite: a tmp left behind, content not replaced, content not the serialized meta.
-        let dir = TempDir::new();
+        let (_tmp, dir) = call_folder("2026-10-30_101010");
         let id = "2026-10-30_101010";
-        write_meta(dir.path(), &sample_meta(id, CallState::Recording)).expect("first");
+        write_meta(&dir, &sample_meta(id, CallState::Recording)).expect("first");
         let mut next = sample_meta(id, CallState::ReadyToTranscribe);
         next.duration_ms = Some(61_000);
-        write_meta(dir.path(), &next).expect("second");
-        assert_eq!(names(dir.path()), vec!["meta.json".to_string()]);
+        write_meta(&dir, &next).expect("second");
+        assert_eq!(names(&dir), vec!["meta.json".to_string()]);
         let back: CallMeta =
-            serde_json::from_slice(&fs::read(dir.path().join("meta.json")).expect("read"))
-                .expect("parse");
+            serde_json::from_slice(&fs::read(dir.join("meta.json")).expect("read")).expect("parse");
         assert_eq!(back, next);
+    }
+
+    /// An empty folder named `id` inside a fresh temp dir: where `write_meta` may write
+    /// (T-251: the folder name is the call id the meta must carry).
+    fn call_folder(id: &str) -> (TempDir, PathBuf) {
+        let tmp = TempDir::new();
+        let dir = tmp.path().join(id);
+        fs::create_dir(&dir).expect("call folder");
+        (tmp, dir)
     }
 
     #[test]
@@ -2042,36 +2057,33 @@ mod tests {
         // `meta.json.tmp` is a folder, so writing it fails (a file-shaped fault; the gate
         // runs as root). Bite: an in-place write (succeeds and replaces the file), the error
         // swallowed (Ok), the previous bytes touched.
-        let dir = TempDir::new();
         let id = "2026-10-30_101010";
-        write_meta(dir.path(), &sample_meta(id, CallState::Recording)).expect("first");
-        let before = fs::read(dir.path().join("meta.json")).expect("read");
-        fs::create_dir(dir.path().join("meta.json.tmp")).expect("tmp as folder");
-        let got = write_meta(dir.path(), &sample_meta(id, CallState::Ready));
+        let (_tmp, dir) = call_folder(id);
+        write_meta(&dir, &sample_meta(id, CallState::Recording)).expect("first");
+        let before = fs::read(dir.join("meta.json")).expect("read");
+        fs::create_dir(dir.join("meta.json.tmp")).expect("tmp as folder");
+        let got = write_meta(&dir, &sample_meta(id, CallState::Ready));
         assert!(got.is_err(), "{got:?}");
+        assert_eq!(fs::read(dir.join("meta.json")).expect("read"), before);
         assert_eq!(
-            fs::read(dir.path().join("meta.json")).expect("read"),
-            before
-        );
-        assert_eq!(
-            names(dir.path()),
+            names(&dir),
             vec!["meta.json".to_string(), "meta.json.tmp".to_string()]
         );
-        assert!(dir.path().join("meta.json.tmp").is_dir());
+        assert!(dir.join("meta.json.tmp").is_dir());
     }
 
     #[test]
     fn write_meta_reports_a_failed_rename() {
         // `meta.json` is a folder, so the tmp is written but the rename fails. Bite: the
         // rename error swallowed at its origin (the write and sync still propagate).
-        let dir = TempDir::new();
-        fs::create_dir(dir.path().join("meta.json")).expect("meta as folder");
+        let (_tmp, dir) = call_folder("2026-10-30_101010");
+        fs::create_dir(dir.join("meta.json")).expect("meta as folder");
         let got = write_meta(
-            dir.path(),
+            &dir,
             &sample_meta("2026-10-30_101010", CallState::Recording),
         );
         assert!(got.is_err(), "{got:?}");
-        assert!(dir.path().join("meta.json").is_dir());
+        assert!(dir.join("meta.json").is_dir());
     }
 
     #[test]
@@ -2096,6 +2108,81 @@ mod tests {
         assert!(made.write_meta(&next).is_err());
         let state = read_json(&made.dir().join("meta.json"))["state"].clone();
         assert_eq!(state, "ready-to-transcribe");
+    }
+
+    #[test]
+    fn write_meta_refuses_a_foreign_id_schema_or_track_set_and_keeps_meta_json() {
+        // T-251 I1: every meta.json write_meta writes passes the structural half of read_meta
+        // for its folder. Each case is InvalidData with meta.json byte-identical and no tmp.
+        // Bite: no check; a check of the id only (or the schema only, or the track files
+        // only); the failed-needs-failure rule missing; an error swallowed into Ok.
+        let id = "2026-10-30_101010";
+        let (_tmp, dir) = call_folder(id);
+        write_meta(&dir, &sample_meta(id, CallState::Recording)).expect("first");
+        let before = fs::read(dir.join("meta.json")).expect("read");
+
+        let foreign_id = sample_meta("2026-10-30_101011", CallState::Recording);
+        let mut schema2 = sample_meta(id, CallState::Recording);
+        schema2.schema = 2;
+        let mut other_file = sample_meta(id, CallState::Recording);
+        other_file.tracks[0].file = "other.opus".to_string();
+        let mut other_system_file = sample_meta(id, CallState::Recording);
+        other_system_file.tracks[1].file = "other.opus".to_string();
+        let mut swapped = sample_meta(id, CallState::Recording);
+        swapped.tracks.swap(0, 1);
+        let failed_without_failure = sample_meta(id, CallState::Failed);
+        let cases = [
+            ("another call id", foreign_id),
+            ("schema 2", schema2),
+            ("mic file renamed", other_file),
+            ("system file renamed", other_system_file),
+            ("tracks swapped", swapped),
+            ("failed without a failure", failed_without_failure),
+        ];
+        for (what, bad) in &cases {
+            let got = write_meta(&dir, bad);
+            assert_eq!(
+                got.as_ref().err().map(io::Error::kind),
+                Some(io::ErrorKind::InvalidData),
+                "{what}: {got:?}"
+            );
+            assert_eq!(
+                fs::read(dir.join("meta.json")).expect("read"),
+                before,
+                "{what}: meta.json is unchanged"
+            );
+            assert_eq!(names(&dir), vec!["meta.json".to_string()], "{what}: no tmp");
+        }
+
+        // A folder whose name is not a call id takes no meta.json at all.
+        let tmp = TempDir::new();
+        let plain = tmp.path().join("plain");
+        fs::create_dir(&plain).expect("plain folder");
+        let got = write_meta(&plain, &sample_meta(id, CallState::Recording));
+        assert_eq!(
+            got.as_ref().err().map(io::Error::kind),
+            Some(io::ErrorKind::InvalidData),
+            "{got:?}"
+        );
+        assert_eq!(names(&plain), Vec::<String>::new());
+    }
+
+    #[test]
+    fn write_meta_still_accepts_a_failed_meta_with_its_failure() {
+        // Characterization (T-251 I1, green before and after): the structural predicate must
+        // not refuse a meta read_meta lists. Bite: a predicate stricter than read_meta's
+        // (failed refused outright).
+        let id = "2026-10-30_101010";
+        let (_tmp, dir) = call_folder(id);
+        let mut failed = sample_meta(id, CallState::Failed);
+        failed.failure = Some(Failure {
+            reason: FailReason::Storage,
+            track: None,
+        });
+        write_meta(&dir, &failed).expect("failed with a failure");
+        let back: CallMeta =
+            serde_json::from_slice(&fs::read(dir.join("meta.json")).expect("read")).expect("parse");
+        assert_eq!(back, failed);
     }
 
     // ---- list ---------------------------------------------------------------------
@@ -2556,14 +2643,14 @@ mod tests {
     fn write_meta_failed_rename_removes_its_tmp() {
         // `meta.json` is a folder, so the tmp is written and synced but the rename fails.
         // Bite: the tmp this write created left behind.
-        let dir = TempDir::new();
-        fs::create_dir(dir.path().join("meta.json")).expect("meta as folder");
+        let (_tmp, dir) = call_folder("2026-10-30_101010");
+        fs::create_dir(dir.join("meta.json")).expect("meta as folder");
         let got = write_meta(
-            dir.path(),
+            &dir,
             &sample_meta("2026-10-30_101010", CallState::Recording),
         );
         assert!(got.is_err(), "{got:?}");
-        assert_eq!(names(dir.path()), vec!["meta.json".to_string()]);
+        assert_eq!(names(&dir), vec!["meta.json".to_string()]);
     }
 
     // ---- storage_kind -------------------------------------------------------------
@@ -2584,7 +2671,7 @@ mod tests {
 
     // ---- T-141: wire, guard, get, export -------------------------------------------
 
-    use crate::call::transcript::{export_json, export_markdown, TranscriptV1};
+    use crate::call::transcript::{export_markdown, TranscriptV1};
 
     const WIRE_FIXTURE: &str = include_str!("../../../../e2e/fixtures/calls-wire.json");
     const READY_ID: &str = "2026-10-29_100000";
@@ -3213,9 +3300,14 @@ mod tests {
             f.store.export_bytes(&calls, &text, READY_ID, Format::Md),
             Ok(export_markdown(&t, "Weekly sync", &names).into_bytes())
         );
+        // The JSON is the transcript with meta's title and names (what export_json builds;
+        // spelled out here so the test compiles whatever export_json returns, T-251).
+        let mut named = t.clone();
+        named.title = "Weekly sync".to_string();
+        named.speakers = names.to_vec();
         assert_eq!(
             f.store.export_bytes(&calls, &text, READY_ID, Format::Json),
-            Ok(export_json(&t, "Weekly sync", &names).into_bytes())
+            Ok(named.to_json().into_bytes())
         );
         // No transcript.json: nothing to export.
         plant(&root, "2026-10-30_130000", CallState::ReadyToTranscribe);
@@ -3833,6 +3925,115 @@ mod tests {
             Some("Alice")
         );
         assert_eq!(names(&dir).len(), 3);
+    }
+
+    /// `plant_named` with a meta.json whose speakers lack `s1`, which a segment of the
+    /// transcript names (a hand-edited list today; diarization or a crash between the two
+    /// writes of a final pass later).
+    fn plant_named_missing_s1_in_meta(f: &Fixture) -> (CallSettings, PathBuf, PathBuf) {
+        let (calls, root, dir) = plant_named(f);
+        let mut meta = read_json(&dir.join("meta.json"));
+        meta["speakers"] = serde_json::json!([{"id": "me", "name": "Alice"}]);
+        fs::write(dir.join("meta.json"), meta.to_string()).expect("meta without s1");
+        (calls, root, dir)
+    }
+
+    #[test]
+    fn rename_with_a_meta_missing_a_segment_speaker_writes_nothing() {
+        // T-251 I2 (owner decision #372): the transcript.json a rename writes must validate;
+        // a meta.json whose speakers lack a segment speaker is ioFailed{other} and every file
+        // keeps its bytes, since all bytes are rendered before the first write. Bite: the
+        // validation missing in export_json's caller; the error swallowed into a written
+        // invalid transcript.json; the check after the transcript.md write.
+        let f = fixture();
+        let (calls, root, dir) = plant_named_missing_s1_in_meta(&f);
+        let text = wire_root(&root);
+        let before = snapshot(&dir);
+        assert_eq!(
+            err_of(f.store.rename(&calls, &text, READY_ID, "Q4 plan")),
+            io_failed(UnwritableReason::Other)
+        );
+        assert_eq!(snapshot(&dir), before, "rename wrote something");
+        assert_eq!(
+            err_of(
+                f.store
+                    .rename_speaker(&calls, &text, READY_ID, "me", "Carol")
+            ),
+            io_failed(UnwritableReason::Other)
+        );
+        assert_eq!(snapshot(&dir), before, "rename_speaker wrote something");
+    }
+
+    #[test]
+    fn export_json_bytes_with_a_meta_missing_a_segment_speaker_are_io_failed() {
+        // T-251 I2: the export and the copy never serve a JSON that read_transcript would
+        // refuse. Bite: export_json's callers serving the unvalidated text; Markdown refused
+        // too (it renders a missing name as the id and stays served).
+        let f = fixture();
+        let (calls, root, dir) = plant_named_missing_s1_in_meta(&f);
+        let text = wire_root(&root);
+        let before = snapshot(&dir);
+        assert_eq!(
+            err_of(f.store.export_bytes(&calls, &text, READY_ID, Format::Json)),
+            io_failed(UnwritableReason::Other)
+        );
+        assert!(
+            f.store
+                .export_bytes(&calls, &text, READY_ID, Format::Md)
+                .is_ok(),
+            "the Markdown renders a missing name as the id"
+        );
+        assert_eq!(snapshot(&dir), before);
+    }
+
+    #[test]
+    fn tmp_open_failed_with_a_file_two_levels_up_is_not_a_folder() {
+        // T-251 I3 (T-141 r1#4): Windows reports a file anywhere up the path as "path not
+        // found"; the nearest existing ancestor is what decides. The NotFound is injected, the
+        // path is real: `file/b` is under a regular file, so its metadata fails too. Bite:
+        // only the immediate parent looked at (metadata(dir).is_ok_and); a walk that stops at
+        // the first missing part; a regular file accepted as a parent of a missing folder.
+        let tmp = TempDir::new();
+        let file = tmp.path().join("afile");
+        fs::write(&file, "mine").expect("file");
+        let missing = io::Error::from(io::ErrorKind::NotFound);
+        assert_eq!(
+            tmp_open_failed(&file.join("b"), &missing),
+            io_failed(UnwritableReason::NotAFolder)
+        );
+        assert_eq!(
+            tmp_open_failed(&file.join("b").join("c"), &missing),
+            io_failed(UnwritableReason::NotAFolder),
+            "three levels"
+        );
+        // The nearest existing ancestor is a folder: the path is only missing.
+        assert_eq!(
+            tmp_open_failed(&tmp.path().join("nope").join("deeper"), &missing),
+            io_failed(UnwritableReason::Missing)
+        );
+        // An error that is not NotFound is never remapped.
+        let denied = io::Error::from(io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            tmp_open_failed(&file.join("b"), &denied),
+            io_failed(UnwritableReason::AccessDenied)
+        );
+        assert_eq!(fs::read(&file).expect("file"), b"mine");
+    }
+
+    #[test]
+    fn export_under_a_file_two_levels_up_is_not_a_folder_and_leaves_nothing() {
+        // T-251 I3, the Windows half: runs on every OS (Unix answers ENOTDIR from the open,
+        // Windows needs the ancestor walk; red on Windows CI before the fix). Bite: the
+        // immediate-parent rule.
+        let dir = TempDir::new();
+        let afile = dir.path().join("afile");
+        fs::write(&afile, "mine").expect("file");
+        assert_eq!(
+            export_to(&afile.join("sub").join("x.md"), b"x"),
+            Err(io_failed(UnwritableReason::NotAFolder))
+        );
+        assert_eq!(fs::read(&afile).expect("file"), b"mine");
+        assert_eq!(names(dir.path()), vec!["afile".to_string()]);
     }
 
     #[test]

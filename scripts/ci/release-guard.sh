@@ -96,10 +96,12 @@
 #      a YAML block scalar ends at its first line indented less than its content, so a block
 #      scalar holding the literal (a job's or the workflow's `env: X: |`, a `name: |`) puts its
 #      own header line, not one of these three, first on the way up; a quoted or plain scalar
-#      cannot hold the literal (its raw ' and " end a quoted one, its `: ` a plain one), and an
-#      anchor that could alias the step would sit on one of the pinned lines. So the literal is
-#      a step of the windows job. A comment line is text here too: GitHub expands ${{ }} in run:
-#      text, comment lines included, before the shell starts (premise from T-086 Investigation
+#      cannot hold the literal (its raw ' and " end a quoted one, its `: ` a plain one). So the
+#      literal is a step under `steps:` of a job keyed `windows:`. An anchor on its own line of
+#      6 or 4 leading spaces (skipped by the walk) can alias those steps or that job into another
+#      job, and a second file can have its own `windows:` job; the aliased step keeps its
+#      reviewed if:, so both fall under "the job around it" in R10's Not caught (T-087 r2#4).
+#      A comment line is text here too: GitHub expands ${{ }} in run: text, comment lines included, before the shell starts (premise from T-086 Investigation
 #      section 2; not checked against GitHub's docs in T-087: no docs tool or web access), and
 #      a comment line with fewer than 6 leading spaces between `    steps:` and the send step is
 #      refused. Zero tokens is refused (the build sends the installer, #93). That the secret
@@ -121,7 +123,8 @@
 #      loosened together; T-088 review 1 finding 1, probes A-G): each starts with `      - ` and
 #      ends on a `      - ` line or a job key line `  <name>:` (a comment line does not end a
 #      step: the key after it joins the step); it is one step: line 1 is the only `      - ` line
-#      before the last, no body line holds `*` (a YAML alias) or `&` outside `&&` (an anchor;
+#      before the last, no body line holds `*` (a YAML alias) or `&` outside `&& ` (two ampersands
+#      and a space; any other `&`, `&&v` included, is an anchor: T-179;
 #      review 2 finding 1: an alias key `*c : pnpm`, with `&c cache` anchored outside the
 #      fragment, spells cache with no cache on the line), exactly one line holds the word
 #      uses, and that line is `      - uses: `
@@ -188,8 +191,13 @@
 # R9's limits: the owned upload literal moved into another job, or hidden inside other YAML such
 # as a `name: |` block scalar, with the real upload step deleted, passes R9; loud, not silent: on
 # a v* tag the release job's download fails and nothing is published (T-084 review 1); an upload
-# through another action is refused by R11 (no unlisted uses line), not by R9;
-# R10's limits: R10 pins the send step and its place, not the job around it: code that runs in
+# through another action is refused by R11 (no unlisted uses line), not by R9; an upload from a
+# `run:` step (curl to the artifact service, a script, any CLI) in any file, teamwright-agent.yml
+# included (R9 per name pins its owned tail, not an upload from another run: step), holds no
+# token and is not refused (T-084 r2#2);
+# R10's limits: R10 pins the send step and its place, not the job around it (the job keyed
+# windows: may be another file's, or aliased into another job by an anchor on a line the walk
+# skips; T-087 r2#4): code that runs in
 # the windows job with the secrets in the send step's environment, on the refs its if: allows
 # (push to main or a v* tag) - a job-level or (in another file) workflow-level env: such as
 # BASH_ENV, an earlier step writing GITHUB_ENV or GITHUB_PATH, an edit of
@@ -198,6 +206,9 @@
 # telegram-send.test.sh's concern, not this guard's; a YAML parser that lets a quoted scalar end
 # without its closing quote, or a block scalar hold a less-indented line, is outside YAML 1.1/1.2
 # (GitHub's parser is not available on the host; probed with PyYAML 6, T-087 Red tests round 2);
+# a bare block-scalar indicator line (`|` or `>` alone on its line) under the windows job's
+# `    steps:` turns its steps into one string and passes R10: the workflow is invalid and nothing
+# runs, loud, not silent (T-087 r2#5);
 # R11-R13's limits (T-088 Investigation section 5): a cache written by a run step (docker buildx
 # --cache-to type=gha, a script calling the cache service); a save if: that is always false on
 # main (loud: main saves nothing); an action input supplied through the environment (a job- or
@@ -322,7 +333,9 @@ for fr in "${frags[@]}"; do
   # No alias or anchor: an alias key (*c : pnpm, with &c cache anchored outside the fragment)
   # spells a word the counts below look for without the word (review 2 finding 1, probes N1-N4).
   ! grep -q -F '*' <<<"$body" || cannot_run "owned fragment $fr holds * (a YAML alias)"
-  ! grep -q -F '&' <<<"${body//&&/}" || cannot_run "owned fragment $fr holds & outside && (a YAML anchor)"
+  # T-179 (T-088 r4#1): only `&& ` (two ampersands and a space, an if: line's and) is deleted, so
+  # an anchor name starting with & (`&&v`) is refused too.
+  ! grep -q -F '&' <<<"${body//&& /}" || cannot_run "owned fragment $fr holds & outside '&& ' (two ampersands and a space; any other & is a YAML anchor)"
   [ "$(wcount uses "$body")" = 1 ] || cannot_run "owned fragment $fr: not exactly one line holds the word uses (one step, one action)"
   ul="$(grep -i -E '(^|[^A-Za-z0-9_])uses([^A-Za-z0-9_]|$)' <<<"$body")"
   [[ "$ul" =~ $uses_re ]] ||
@@ -828,4 +841,4 @@ case "$rc" in
   *) cannot_run "awk failed (exit $rc) on $dir or an owned copy ($owned, $ownedh, $ownedu, $ownedt, $ownedl, $csd, $ownedc, $ownedp, $ownedw)" ;;
 esac
 grep -q '^V ' <<<"$report" && cannot_run "awk listed violations but exited 0"
-echo "release-guard: ok: $dir: ${#files[@]} file(s); token read-only but in the release job, which is the owned copy; no other secret, permissions or gh; one installer upload, the owned tag-only step; the Telegram secrets only in the owned send step of the windows job; every action an owned line or step fragment, no column-0 line after jobs:, no merge key; the windows job head the owned copy with its bound"
+echo "release-guard: ok: $dir: ${#files[@]} file(s); token read-only but in the release job, which is the owned copy; no other secret, permissions or gh; one installer upload-artifact step, the owned tag-only step, the only other upload-artifact step the owned contour session tail of teamwright-agent.yml; the Telegram secrets only in the owned send step, a step under steps: of a job keyed windows:; every action an owned line or step fragment, no column-0 line after jobs:, no merge key; the windows job head the owned copy with its bound"

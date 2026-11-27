@@ -604,6 +604,7 @@ fn a_write_denied_logs_folder_shows_one_notice_and_the_dictation_still_delivers(
             hotkeys: Arc::clone(&hotkeys),
             detector: Err(voicen_core::vad::VadError::Unavailable),
             temp_audio: Arc::new(voicen_core::platform::FakeTempAudioStore::new()),
+            history: voicen_lib::dictation::HistorySink::Discard,
         },
     )
     .expect("start_dictation");

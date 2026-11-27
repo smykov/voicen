@@ -29,7 +29,7 @@
 // granule - pre-skip.
 
 use std::collections::VecDeque;
-use std::io::{self, Read, Seek, Write};
+use std::io::{self, Read, Seek};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -66,24 +66,9 @@ const MAX_PACKET: usize = 4_000;
 /// The longest Opus packet (120 ms) at `RATE`.
 const MAX_DECODED: usize = 120 * SAMPLES_PER_MS;
 
-/// A writer whose written data can be made durable: `File::sync_data` in production, a
-/// counting fake in tests.
-pub trait SyncWrite: Write {
-    fn sync_data(&mut self) -> io::Result<()>;
-}
-
-impl SyncWrite for std::fs::File {
-    fn sync_data(&mut self) -> io::Result<()> {
-        std::fs::File::sync_data(self)
-    }
-}
-
-/// A boxed writer syncs through what it holds (the session's track opener hands one out).
-impl<W: SyncWrite + ?Sized> SyncWrite for Box<W> {
-    fn sync_data(&mut self) -> io::Result<()> {
-        (**self).sync_data()
-    }
-}
+/// The durable writer of a track; defined with the one tmp+sync+rename tail in
+/// [`crate::files`] (T-251) and kept here under its old path.
+pub use crate::files::SyncWrite;
 
 /// Writes one call track (contracts/core-call.md "Codec"). Runs on the session's writer
 /// thread, never in the audio callback.

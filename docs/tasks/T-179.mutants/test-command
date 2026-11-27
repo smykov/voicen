@@ -1,0 +1,2 @@
+# bash tests, outside tw-test core/ui; run in the core area container by tw-mutants. release-guard.test.sh is not here: 37 of its scan cases are red in the container (green on the host), so its R4 mutant (break after the second allowed secret) is checked by hand on the host.
+bash scripts/ci/release-check.test.sh && bash scripts/ci/release.test.sh && bash scripts/ci/version-stamp.test.sh
