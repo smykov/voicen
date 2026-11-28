@@ -1,0 +1,8 @@
+guarantee: Failure branch: notFound and a non-CallError rejection show the base text, naming no folder (EN, /folder/i)
+file: i18n/en.json
+added_by: test-writer
+--- old
+  "calls.error.io": "Could not complete the action.",
+--- new
+  "calls.error.io": "Could not complete the action on the call folder.",
+--- end

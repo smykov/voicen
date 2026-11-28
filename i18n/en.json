@@ -14,7 +14,7 @@
   "calls.empty": "No calls yet — choose Call › Record in the tray or press {hotkey}",
   "calls.error.empty_name": "Enter a name.",
   "calls.error.in_use": "Could not delete: {file} is in use",
-  "calls.error.io": "The call folder could not be read or changed.",
+  "calls.error.io": "Could not complete the action.",
   "calls.error.io.access_denied": "Could not complete the action: access denied",
   "calls.error.io.disk_full": "Could not complete the action: the disk is full",
   "calls.error.io.missing": "Could not complete the action: the file or folder is not available",

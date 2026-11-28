@@ -310,6 +310,42 @@ test("AC-6 failure branch: a refused Open folder shows its reason", async ({ pag
   expect((await calls(page, "calls_open_folder")).map((c) => c.args)).toEqual([READY]);
 });
 
+// T-255 failure branch: a notFound and a rejection that is not a CallError both reach the base id
+// calls.error.io (callErrorMessageId's catch-all). Its text must name no folder: nothing is known
+// to have touched one (decisions #377: EN "Could not complete the action.", RU "Не удалось
+// выполнить действие."). Each test is red on the negative (/folder/i, /папк/i), which does not
+// depend on what the catalog says; the equality part follows the catalog and the exact texts are
+// pinned in core (call_texts_the_contract_spells_out_are_exact).
+const BASE_ACTIONS = [
+  { cmd: "calls_copy_markdown", label: "calls.copy", args: READY },
+  { cmd: "calls_export", label: "calls.export_md", args: { ...READY, format: "md" } },
+  { cmd: "calls_open_folder", label: "calls.open_folder", args: READY },
+] as const;
+
+const BASE_REJECTIONS = [
+  { name: "notFound", reject: () => callsError("notFound") },
+  { name: "a non-CallError rejection", reject: () => "ipc refused: command not allowed" },
+] as const;
+
+for (const lang of ["en", "ru"] as const) {
+  const text = lang === "en" ? en : ru;
+  const folder = lang === "en" ? /folder/i : /папк/i;
+  for (const action of BASE_ACTIONS) {
+    for (const rejection of BASE_REJECTIONS) {
+      test(`T-255 failure branch (${lang}): ${action.cmd} rejected with ${rejection.name} shows the base text, naming no folder`, async ({ page }) => {
+        await openCalls(page, { lang, list: lang === "ru" ? callsListRu() : callsListAll() });
+        await expect(readyRow(page)).toBeVisible();
+        await expect(alert(page)).toHaveCount(0); // nothing is shown before the refusal
+        await queueCallsResult(page, action.cmd, { reject: rejection.reject() });
+        await readyRow(page).getByRole("button", { name: text(action.label) }).click();
+        await expect(alert(page)).toHaveText(text("calls.error.io"));
+        await expect(alert(page)).not.toContainText(folder);
+        expect((await calls(page, action.cmd)).map((c) => c.args)).toEqual([action.args]);
+      });
+    }
+  }
+}
+
 test("AC-4 failure branch: a refused calls_get shows its reason and no detail", async ({ page }) => {
   await openCalls(page);
   await expect(readyRow(page)).toBeVisible();
