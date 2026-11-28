@@ -15,9 +15,14 @@
 //!   Each window is tagged with the reducer's build generation and its `Destroyed`
 //!   posts it; one wake hands all `Destroyed` and the newest state to `on_wake`
 //!   together, so a stale `Destroyed` is ignored and the order they arrived in does
-//!   not matter. The thread drops its window handle exactly when `on_wake` reports
-//!   `window_gone` (the current window's `Destroyed`); it never re-derives that rule
-//!   (T-172).
+//!   not matter. tauri frees the label (and runs the app's run callback) before the
+//!   window's listeners run, so each wake first asks tauri through the shared label
+//!   probe (`overlay_class::probe_label`, T-224): a held, `Live` window whose label
+//!   tauri no longer knows counts as destroyed in this wake, and a shown state taken
+//!   in that gap builds a new window instead of emitting to the gone one; the late real
+//!   `Destroyed` is then stale. The thread drops its window handle exactly when
+//!   `on_wake` reports `window_gone` (the current window's `Destroyed`); it never
+//!   re-derives that rule (T-172).
 //! - The window is built hidden with `focused(false)` and `focusable(false)`
 //!   (`WS_EX_NOACTIVATE`, `WS_EX_TOPMOST`). [`show_click_through`], on the overlay
 //!   thread, then clears the overlay class's `WS_CAPTION`, writes the click-through
@@ -308,7 +313,10 @@ fn run<R: Runtime>(
     // stays reported through later wakes of the same seq.
     let mut handled = Settled::default();
     loop {
-        let (destroyed, newest) = thread.shared.wait();
+        let (mut destroyed, newest) = thread.shared.wait();
+        // The label probe (T-224): a window tauri already freed counts as destroyed in
+        // this wake, before its own Destroyed listener posted.
+        overlay_class::probe_label(&mut thread, &mut destroyed);
         let wake = thread
             .lifecycle
             .on_wake(&destroyed, newest.as_ref().map(|e| (e.seq, &e.state)));

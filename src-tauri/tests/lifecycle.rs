@@ -620,6 +620,10 @@ const OVERLAY_HELD: Duration = Duration::from_secs(25);
 struct HeldOverlayReport {
     /// The main thread was still held when the overlay state was published (premise).
     held_at_publish: bool,
+    /// T-224 (mutant 15): `overlay::settled(handle, Duration::ZERO)` read while the main
+    /// thread was still held (outer `None`: the premise did not hold at that read).
+    /// The build has not run, so there is no receipt: the inner value must be `None`.
+    receipt_while_held: Option<Option<voicen_lib::overlay::Settled>>,
     built: OverlayBuilt,
     /// The window exists when the driver looks again after the verdict (a raw fact).
     window_after: bool,
@@ -664,10 +668,15 @@ fn the_overlay_build_queued_behind_a_slow_main_thread_is_decided_by_the_receipt(
         // the build request queues behind it.
         let holding = posted.is_ok() && started_rx.recv_timeout(ROUND_TRIP).is_ok();
         indicator.set_overlay(&OverlayState::Recording);
-        let held_at_publish =
-            holding && matches!(done_rx.try_recv(), Err(mpsc::TryRecvError::Empty));
+        let still_held = |done_rx: &mpsc::Receiver<()>| {
+            holding && matches!(done_rx.try_recv(), Err(mpsc::TryRecvError::Empty))
+        };
+        let receipt_now = voicen_lib::overlay::settled(&handle, Duration::ZERO);
+        let receipt_while_held = still_held(&done_rx).then_some(receipt_now);
+        let held_at_publish = still_held(&done_rx);
         let mut report = HeldOverlayReport {
             held_at_publish,
+            receipt_while_held,
             built: overlay_built(&handle),
             ..HeldOverlayReport::default()
         };
@@ -684,6 +693,15 @@ fn the_overlay_build_queued_behind_a_slow_main_thread_is_decided_by_the_receipt(
         report.held_at_publish,
         "premise: the main thread was still held by the planted task when the overlay \
          state was published: {report:?}"
+    );
+    // Bite (T-173 r1#4, mutant 15): a `wait_settled` that answers a stale receipt (e.g. seq
+    // 0) when the hang bound passes instead of `None`.
+    assert_eq!(
+        report.receipt_while_held,
+        Some(None),
+        "premise or receipt: while the main thread was held, `overlay::settled(handle, \
+         Duration::ZERO)` must be None (the build had not run); outer None = the main thread \
+         was no longer held at that read: {report:?}"
     );
     assert!(
         report.built.built(),

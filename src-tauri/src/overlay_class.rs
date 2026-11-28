@@ -13,6 +13,10 @@
 //! - [`execute`] runs every reducer answer of either window: `catch_unwind` per action,
 //!   one `overlay_failed` line per failure and the Destroy-failure rule; the per-window
 //!   differences are the hooks of [`OverlayClassThread`].
+//! - [`probe_label`] decides each wake on tauri's liveness (T-224): a held, `Live`
+//!   window whose label tauri no longer knows counts as destroyed in that wake, before
+//!   its own `Destroyed` listener posted (the same label test as the Destroy-failure
+//!   rule).
 //!
 //! Every failure writes one `warning kind=overlay_failed` line: the kind and the OS code
 //! only, no payload, handle or error text (#45, FR-20).
@@ -21,7 +25,7 @@ use std::panic::AssertUnwindSafe;
 
 use tauri::{AppHandle, Manager, Runtime, WebviewWindow};
 use voicen_core::diag::{Log, LogEvent, WarningKind};
-use voicen_core::overlay::{OverlayLifecycle, WindowAction};
+use voicen_core::overlay::{OverlayLifecycle, WindowAction, WindowPhase};
 
 use crate::diag::io_os_code;
 
@@ -64,6 +68,31 @@ pub(crate) trait OverlayClassThread<R: Runtime> {
 
     /// Hands the reducer a `Destroyed` for the window built with `generation`.
     fn post_destroyed(&self, generation: u64);
+}
+
+/// The label probe (T-224): decides a wake on the window's liveness as tauri shows it.
+/// When `thread` holds a window, the phase is `Live` and tauri no longer knows
+/// [`OverlayClassThread::LABEL`], the window went from outside and tauri already freed
+/// its label, but its own `Destroyed` listener has not posted yet (tauri frees the label
+/// and runs the app's run callback before the window's listeners, in one main-thread
+/// dispatch). The current generation is then added to this wake's `destroyed`, so the
+/// newest state taken in the same wake is decided together with that `Destroyed` (a
+/// newer shown state builds instead of emitting to a gone window). The late real
+/// `Destroyed` is then stale by generation, or ignored with no window. The label test is
+/// the Destroy-failure rule's in [`execute`]; the HWND is not asked (it dies before the
+/// label is freed, and a build then would find the label still taken). Called by each
+/// thread right after its mailbox snapshot, before the reducer.
+pub(crate) fn probe_label<R: Runtime, T: OverlayClassThread<R>>(
+    thread: &mut T,
+    destroyed: &mut Vec<u64>,
+) {
+    let live = thread.window().is_some() && thread.lifecycle().phase() == WindowPhase::Live;
+    if live && thread.app().get_webview_window(T::LABEL).is_none() {
+        let generation = thread.lifecycle().generation();
+        if !destroyed.contains(&generation) {
+            destroyed.push(generation);
+        }
+    }
 }
 
 /// Runs one reducer answer of `thread` and returns whether it failed (each failure writes

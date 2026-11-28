@@ -15,7 +15,9 @@
 //!   `visible` = the newest `IndicatorState.recording`): the window is built at the first
 //!   recording state, never at app start, destroyed when recording ends (NFR-03), and
 //!   built again at the next call; "destroyed" comes from the window's own `Destroyed`
-//!   event, tagged with the reducer's generation.
+//!   event, tagged with the reducer's generation, or earlier from the shared label probe
+//!   (`overlay_class::probe_label`, T-224): a `Live` window whose label tauri already
+//!   freed counts as destroyed in that wake.
 //! - The window is built hidden, undecorated, topmost, without a taskbar button and
 //!   non-activating (`focusable(false)`: `WS_EX_NOACTIVATE`, variant N of the spike). The
 //!   thread waits until its page finished loading (at most `PAGE_LOAD_WAIT`). On
@@ -345,7 +347,10 @@ fn run<R: Runtime>(
     let mut handled = Settled::default();
     loop {
         let live = thread.window.is_some() && thread.lifecycle.phase() == WindowPhase::Live;
-        let wake = thread.shared.wait(live, thread.last_tick);
+        let mut wake = thread.shared.wait(live, thread.last_tick);
+        // The label probe (T-224): a window tauri already freed counts as destroyed in
+        // this wake, before its own Destroyed listener posted.
+        overlay_class::probe_label(&mut thread, &mut wake.destroyed);
         if thread.lifecycle.phase() != WindowPhase::Absent
             && wake.destroyed.contains(&thread.lifecycle.generation())
         {

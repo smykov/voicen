@@ -63,7 +63,7 @@ use tauri::ipc::{CallbackFn, InvokeBody};
 use tauri::test::{get_ipc_response, MockRuntime};
 use tauri::utils::assets::{AssetKey, AssetsIter, CspHash};
 use tauri::webview::InvokeRequest;
-use tauri::{App, AppHandle, Assets, Context, Listener, Manager, RunEvent, Wry};
+use tauri::{App, AppHandle, Assets, Context, Listener, Manager, RunEvent, WindowEvent, Wry};
 use timing_support::{eventually, holds_for, measure, now};
 use voicen_core::call::indicator::{IndicatorState, IndicatorTick};
 use voicen_core::call::session::CallIndicator;
@@ -340,6 +340,18 @@ fn run_with_driver<T: Send + 'static>(
     rig: Rig,
     driver: impl FnOnce(AppHandle<Wry>, Arc<SettingsService>) -> T + Send + 'static,
 ) -> T {
+    run_with_driver_hooked(rig, |_, _| {}, driver)
+}
+
+/// [`run_with_driver`] whose run callback first hands every event to `hook`, on the main thread,
+/// as tauri's own callback does it: for a window's `Destroyed` that is after tauri freed the
+/// label and before the window's own listeners ran (T-224).
+#[track_caller]
+fn run_with_driver_hooked<T: Send + 'static>(
+    rig: Rig,
+    mut hook: impl FnMut(&AppHandle<Wry>, &RunEvent) + 'static,
+    driver: impl FnOnce(AppHandle<Wry>, Arc<SettingsService>) -> T + Send + 'static,
+) -> T {
     let Rig {
         app,
         outcome,
@@ -349,6 +361,7 @@ fn run_with_driver<T: Send + 'static>(
     let (tx, rx) = mpsc::channel();
     let mut driver = Some(driver);
     let code = app.run_return(move |handle, event| {
+        hook(handle, &event);
         let ready = matches!(event, RunEvent::Ready);
         voicen_lib::on_run_event(handle, event, &outcome, false);
         if ready {
@@ -1220,6 +1233,104 @@ fn s8_the_build_to_shown_time_is_logged_and_the_window_is_shown() {
 }
 
 // ==== lifecycle: destroy at stop, rebuild at the next start (NFR-03) ===========================
+
+/// What the run-event hook saw at the indicator's outside `Destroyed` (T-224).
+#[derive(Debug, Default, Clone, Copy)]
+struct GapFacts {
+    /// The hook ran for the indicator's `Destroyed` after the driver armed it.
+    ran: bool,
+    /// tauri no longer knew the label at that moment.
+    label_free: bool,
+    /// The receipt after a recording state published in that gap, waited for at most `SETTLE`
+    /// while the main thread was held (a hold, not a verdict).
+    receipt_in_gap: Option<Settled>,
+}
+
+#[test]
+fn a_shown_state_published_in_the_gap_before_the_indicators_destroyed_listener_rebuilds_it() {
+    // T-224 (T-173 r1#1, the indicator's `run` has the overlay's shape): tauri frees the label
+    // before the window's own `Destroyed` listener runs; a shown state taken by the indicator
+    // thread in that gap is an Emit to a window tauri no longer has (Ok, receipt
+    // `{window: true}` on the stale handle) and the late Destroyed rebuilds nothing. The hook
+    // publishes a recording state at that `Destroyed` and holds the main thread until the
+    // receipt covers it or `SETTLE` passed; afterwards the window must exist and be visible.
+    // Bite: no label probe in the indicator's wake (red: receipt `window: true` but no window),
+    // a probe only in the overlay's `run`.
+    let _serial = serial();
+    let _watchdog = watchdog(
+        "a_shown_state_published_in_the_gap_before_the_indicators_destroyed_listener_rebuilds_it",
+    );
+    let dir = TempDir::new();
+    let rig = wry_rig(dir.path(), Page { drag: false });
+    let armed = Arc::new(AtomicBool::new(false));
+    let gap = Arc::new(Mutex::new(GapFacts::default()));
+    let hook = {
+        let armed = Arc::clone(&armed);
+        let gap = Arc::clone(&gap);
+        move |handle: &AppHandle<Wry>, event: &RunEvent| {
+            let RunEvent::WindowEvent {
+                label,
+                event: WindowEvent::Destroyed,
+                ..
+            } = event
+            else {
+                return;
+            };
+            if label != LABEL || !armed.swap(false, Ordering::SeqCst) {
+                return;
+            }
+            let label_free = handle.get_webview_window(LABEL).is_none();
+            ShellCallIndicator::new(handle).set_state(&recording_state());
+            // Holds the main thread: unfixed the thread settles at once (an Emit to the gone
+            // window); fixed it asks for a build, which waits for this thread.
+            let receipt_in_gap = call_indicator::settled(handle, SETTLE);
+            *gap.lock().unwrap_or_else(PoisonError::into_inner) = GapFacts {
+                ran: true,
+                label_free,
+                receipt_in_gap,
+            };
+        }
+    };
+    let driver_gap = Arc::clone(&gap);
+    let (first, facts, newer, one_after_gap) =
+        run_with_driver_hooked(rig, hook, move |handle, _service| {
+            let (_indicator, first) = show_recording(&handle);
+            if !first.ok() {
+                return (first, GapFacts::default(), Shown::default(), false);
+            }
+            armed.store(true, Ordering::SeqCst);
+            if let Some(window) = handle.get_webview_window(LABEL) {
+                let _ = window.destroy();
+            }
+            // The hook has finished (its hold included) when `ran` is set.
+            let _ = eventually(|| {
+                driver_gap
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .ran
+            });
+            let facts = *driver_gap.lock().unwrap_or_else(PoisonError::into_inner);
+            // The receipt for the state published in the gap, read once the main thread runs.
+            let newer = shown(&handle);
+            let one_visible =
+                |handle: &AppHandle<Wry>| indicator_hwnd(handle).is_some_and(is_visible);
+            let one_after_gap =
+                newer.ok() && one_visible(&handle) && holds_for(SETTLE, || one_visible(&handle));
+            (first, facts, newer, one_after_gap)
+        });
+    assert!(first.ok(), "the first start did not show: {first:?}");
+    assert!(
+        facts.ran && facts.label_free,
+        "premise: the run-event hook must see the indicator's Destroyed with the label already \
+         freed by tauri: {facts:?}"
+    );
+    assert!(
+        one_after_gap,
+        "receipt {newer:?} (in the gap, main thread held: {:?}) but no visible indicator \
+         window",
+        facts.receipt_in_gap
+    );
+}
 
 #[test]
 fn the_window_is_destroyed_when_the_call_stops_and_built_again_at_the_next_start() {
