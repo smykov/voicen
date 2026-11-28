@@ -1,0 +1,9 @@
+guarantee: Acceptance 2 + failure branch: a track with a queued event is never counted stalled; behind a slow System handle the Mic has no zero-filled span over real blocks (fix reverted: advance decides without draining first)
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+test: cargo test -p voicen-core -j2 --test call_session a_slow_
+--- old
+            if self.drain_track(track) || self.rec.is_none() {
+--- new
+            if self.rec.is_none() {
+--- end

@@ -4330,3 +4330,113 @@ fn a_toggle_off_with_nothing_recording_hands_nothing_to_the_shell() {
     assert!(rig.shell.readied().is_empty());
     assert!(rig.shell.order().is_empty());
 }
+
+// ---- T-225: neither track is zero-filled over its queued blocks -------------------------
+
+/// Subtitles and record on, a 300 Hz tone on both tracks for 400 ms; the writer then parks
+/// inside one `audio` handle of `parked_track` while that track's 400..1400 ms are fed and
+/// the other track's 400..1400 ms queue behind it; the monotonic clock moves 600 ms (more
+/// than the 500 ms stall) and the writer is released. Returns the decoded (mic, system).
+fn slow_handle_call(parked_track: Track) -> (Vec<f32>, Vec<f32>) {
+    let other = match parked_track {
+        Track::Mic => Track::System,
+        Track::System => Track::Mic,
+    };
+    let rig = CallRig::with_capacity(8_192, quiet);
+    rig.session.toggle_subtitles(true, CallSource::Switch);
+    started(&rig, CallSource::Tray);
+    let both = [Track::Mic, Track::System];
+    rig.source.feed_tone(Track::Mic, 0, 400, 0.5);
+    rig.source.feed_tone(Track::System, 0, 400, 0.5);
+    drained(&rig, &both, 400);
+
+    let pause = rig.session.pause_writer();
+    rig.subtitles.arm_park(parked_track);
+    rig.source.feed_tone(parked_track, 400, 1_400, 0.5);
+    drop(pause);
+    assert!(
+        wait(|| rig.subtitles.is_parked()),
+        "premise: the writer is held inside a handle of the parked track"
+    );
+    rig.source.feed_tone(other, 400, 1_400, 0.5);
+    rig.mono.advance(ms(600));
+    rig.subtitles.release_park();
+    drained(&rig, &both, 1_400);
+    assert!(rig.session.stop(StopReason::User));
+    (
+        track_samples(&rig, "mic.opus"),
+        track_samples(&rig, "system.opus"),
+    )
+}
+
+/// No 100 ms window of `samples` in 400..1300 ms is (nearly) silent where a tone was fed.
+#[track_caller]
+fn no_zero_filled_span(label: &str, samples: &[f32]) {
+    let rms: Vec<f32> = (4..13)
+        .map(|w| rms_between(samples, w * 100, w * 100 + 100))
+        .collect();
+    assert!(
+        rms.iter().all(|r| *r >= 0.05),
+        "{label}: a tone was fed over 400..1400 ms, but the 100 ms windows from 400 ms have \
+         RMS {rms:?} (zero-filled over queued blocks)"
+    );
+}
+
+/// A block is 20 ms of 16 kHz samples.
+const ONE_BLOCK: usize = 320;
+
+#[test]
+fn a_slow_handle_of_one_track_does_not_zero_fill_the_other_tracks_queued_blocks() {
+    // T-225 Acceptance 2 and the failure branch: the writer is held 600 ms (mono) inside
+    // one System handle while the Mic's real blocks queue; `Writer::advance` must not take
+    // the Mic as stalled (its channel is not empty) and zero-fill it up to the System's
+    // last_end - 200 ms. Today the Mic reads 0.000 RMS over ~400..1200 ms and is ~1439 ms
+    // long (F-037's re-anchor drift). Bite: `advance` judging a stall from the writer's
+    // last take alone, without reading the track's channel first.
+    let (mic, system) = slow_handle_call(Track::System);
+    no_zero_filled_span("mic", &mic);
+    no_zero_filled_span("system", &system);
+    assert!(
+        mic.len().abs_diff(system.len()) <= ONE_BLOCK,
+        "the tracks differ in length: mic {} ms, system {} ms",
+        mic.len() / 16,
+        system.len() / 16
+    );
+}
+
+#[test]
+fn a_slow_mic_handle_does_not_zero_fill_the_system_tracks_queued_blocks() {
+    // T-225 mirror guard (hypothesis 1, refuted): the writer held inside a Mic handle while
+    // the System queues. Green today and must stay green: the System loop of `drain` always
+    // ends on an empty read just before `advance`.
+    let (mic, system) = slow_handle_call(Track::Mic);
+    no_zero_filled_span("mic", &mic);
+    no_zero_filled_span("system", &system);
+    assert!(
+        mic.len().abs_diff(system.len()) <= ONE_BLOCK,
+        "the tracks differ in length: mic {} ms, system {} ms",
+        mic.len() / 16,
+        system.len() / 16
+    );
+}
+
+#[test]
+fn a_live_track_that_delivered_nothing_for_500_ms_is_still_advanced() {
+    // T-225 guard (I9, must stay green): the drain-before-advance fix reads a track's
+    // channel first, but a live track whose channel is EMPTY and whose last event is 500 ms
+    // old is still taken as stalled and zero-filled to the other track's last_end - 200 ms.
+    // Only the Mic delivers (2 s of tone); after the clock moves 600 ms the System file,
+    // which held only its headers, grows by the written zeros. Bite: `advance` never
+    // filling a live stalled track (only a lost one).
+    let rig = CallRig::with_capacity(8_192, quiet);
+    rig.session.toggle_subtitles(true, CallSource::Switch);
+    started(&rig, CallSource::Tray);
+    rig.source.feed_tone(Track::Mic, 0, 2_000, 0.5);
+    drained(&rig, &[Track::Mic], 2_000);
+    let before = track_sizes(&rig)[1];
+    rig.mono.advance(ms(600));
+    assert!(
+        wait(|| track_sizes(&rig)[1] > before),
+        "the silent System track is zero-filled behind the Mic (stored size stayed {before})"
+    );
+}

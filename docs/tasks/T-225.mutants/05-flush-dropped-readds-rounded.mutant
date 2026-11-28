@@ -1,0 +1,10 @@
+guarantee: Acceptance 3 (T-124 r1#3): a pending drop keeps its exact time over failed retries while the channel stays full (fix reverted: the rounded ms is re-added)
+file: crates/voicen-core/src/call/capture.rs
+added_by: test-writer
+test: cargo test -p voicen-core -j2 --lib a_pending_drop
+--- old
+                self.shared.dropped.fetch_add(v, Ordering::AcqRel);
+--- new
+                let rounded = (v >> DROP_US_BITS << DROP_US_BITS) | ((v & DROP_US_MASK) + 500) / 1_000 * 1_000;
+                self.shared.dropped.fetch_add(rounded, Ordering::AcqRel);
+--- end

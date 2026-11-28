@@ -1,0 +1,9 @@
+guarantee: Acceptance 3 (T-124 r1#3): a pending drop re-added on Full keeps its block count as well as its time
+file: crates/voicen-core/src/call/capture.rs
+added_by: test-writer
+test: cargo test -p voicen-core -j2 --lib a_pending_drop
+--- old
+                self.shared.dropped.fetch_add(v, Ordering::AcqRel);
+--- new
+                self.shared.dropped.fetch_add(v & DROP_US_MASK, Ordering::AcqRel);
+--- end

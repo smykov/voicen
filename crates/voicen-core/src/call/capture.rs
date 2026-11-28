@@ -206,18 +206,20 @@ struct Lane {
 impl Lane {
     /// Deliver a pending drop before anything queued after it. `false` when the queue is
     /// still full (the drop stays pending, so what follows must be dropped too).
+    ///
+    /// A refused send puts back the packed value it took (blocks and exact microseconds), not
+    /// the rounded event, so retries while the queue stays full lose no time.
     fn flush_dropped(&self) -> bool {
-        let Some(event) = self.shared.take_dropped() else {
+        let v = self.shared.dropped.swap(0, Ordering::AcqRel);
+        if v == 0 {
             return true;
-        };
-        match self.tx.try_send(event) {
+        }
+        match self.tx.try_send(unpack_dropped(v)) {
             Ok(()) | Err(TrySendError::Disconnected(_)) => true,
-            Err(TrySendError::Full(TrackEvent::Dropped { blocks, ms })) => {
-                let v = (u64::from(blocks) << DROP_US_BITS) | (u64::from(ms) * 1_000);
+            Err(TrySendError::Full(_)) => {
                 self.shared.dropped.fetch_add(v, Ordering::AcqRel);
                 false
             }
-            Err(TrySendError::Full(_)) => false,
         }
     }
 
@@ -718,7 +720,13 @@ impl Timeline {
                 if zeros > 0 {
                     conv.fifo.resize(conv.fifo.len() + zeros, 0.0);
                     self.fill.add(in_pos, zeros as f64 * per);
-                    if self.drain(&mut step).is_err() {
+                    // Unreachable by construction (decisions #378): the ratio is clamped to
+                    // 1 ± MAX_ADJ, inside MAX_RELATIVE, and the converter feeds exactly
+                    // `chunk` frames into a buffer of `output_frames_max()`. Release keeps
+                    // the length with zeros; debug builds stop here.
+                    let drained = self.drain(&mut step);
+                    debug_assert!(drained.is_ok(), "resampler error in advance_to");
+                    if drained.is_err() {
                         self.conv = None;
                         self.fill_direct(&mut step, target);
                     }
@@ -831,7 +839,12 @@ impl Timeline {
             }
             let pad = conv.chunk - conv.fifo.len() % conv.chunk;
             conv.fifo.resize(conv.fifo.len() + pad, 0.0);
-            if conv.run(&mut out).is_err() {
+            // Unreachable by construction (decisions #378): the ratio is clamped to
+            // 1 ± MAX_ADJ, inside MAX_RELATIVE, and the input is padded to whole chunks.
+            // Release pads the rest with zeros below; debug builds stop here.
+            let ran = conv.run(&mut out);
+            debug_assert!(ran.is_ok(), "resampler error in retire");
+            if ran.is_err() {
                 break;
             }
         }
@@ -1576,6 +1589,24 @@ mod tests {
                 at: ms(5)
             }]
         );
+    }
+
+    #[test]
+    fn a_pending_drop_keeps_its_exact_time_over_failed_retries_while_the_channel_stays_full() {
+        // T-225 (T-124 r1#3): 100 frames at 44.1 kHz are 2268 us (not a whole ms). Capacity
+        // 1 and the queue never drained: the first block fills it, the other 11 are
+        // dropped, and each of the last 10 first retries to deliver the pending drop, fails
+        // on a full queue and puts it back. The delivered `Dropped.ms` is the rounded sum
+        // of the raw time, 11 * 2.268 = 24.9 -> 25 ms; re-adding the already rounded ms on
+        // each retry loses 0.268 ms per retry and delivers 22. Bite: `flush_dropped` adding
+        // `ms * 1_000` back instead of the raw packed value.
+        let (sink, mic_rx, _sys) = ChannelSink::new(1);
+        for i in 0..12 {
+            sink.block(Track::Mic, &[0.5; 100], 44_100, 1, ms(i * 3));
+        }
+        let events = drain(&mic_rx);
+        assert_eq!(events.len(), 2, "{events:?}");
+        assert_eq!(events[1], TrackEvent::Dropped { blocks: 11, ms: 25 });
     }
 
     // ---- levels (AC-7) -------------------------------------------------------------------
